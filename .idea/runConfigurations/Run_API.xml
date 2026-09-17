@@ -1,0 +1,17 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Run API" type="GoApplicationRunConfiguration" factoryName="Go Application">
+    <module name="homevision" />
+    <working_directory value="$PROJECT_DIR$" />
+    <parameters value="-addr :8080" />
+    <envs>
+      <!-- pdftoppm lives in Homebrew's bin, which GoLand does not inherit when
+           launched from the Dock rather than a shell. -->
+      <env name="PATH" value="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" />
+    </envs>
+    <kind value="PACKAGE" />
+    <package value="homevision" />
+    <directory value="$PROJECT_DIR$" />
+    <filePath value="$PROJECT_DIR$/main.go" />
+    <method v="2" />
+  </configuration>
+</component>

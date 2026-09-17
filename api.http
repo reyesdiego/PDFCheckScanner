@@ -1,0 +1,177 @@
+# Checkbox detection API. Start the server with the "Run API" configuration,
+# then run a request below with the ▶ gutter icon (or ⌘⏎ / Ctrl+Enter).
+#
+# Fixtures come from testdata/; regenerate them with:
+#   python3 testdata/gen_fixtures.py
+
+@host = http://localhost:8080
+
+### An image of a form: 4 checkboxes, the middle two marked
+POST {{host}}/detect
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="image"; filename="form.png"
+
+< ./testdata/form.png
+--Boundary--
+
+> {%
+    client.test("four checkboxes, two of them checked", function () {
+        client.assert(response.status === 200, "status " + response.status);
+        const found = response.body.detections;
+        client.assert(response.body.method === "pixels", "method " + response.body.method);
+        client.assert(found.length === 4, "found " + found.length);
+        client.assert(found.filter(d => d.checked).length === 2,
+            "checked " + found.filter(d => d.checked).length);
+        client.assert(found.every(d => d.label === "checkbox"), "unexpected label");
+        client.assert(found.every(d => d.confidence > 0 && d.confidence <= 1),
+            "confidence out of range");
+    });
+%}
+
+### A WebP upload, to confirm the format is read via golang.org/x/image
+POST {{host}}/detect
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="image"; filename="patio.webp"
+
+< ./testdata/lossy.webp
+--Boundary--
+
+> {%
+    client.test("webp is decoded and measured", function () {
+        client.assert(response.status === 200, "status " + response.status);
+        client.assert(response.body.image.content_type === "image/webp",
+            "content_type " + response.body.image.content_type);
+        client.assert(response.body.image.width === 150, "width " + response.body.image.width);
+    });
+%}
+
+### A PDF with real form fields: answered exactly, from the AcroForm
+POST {{host}}/detect
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="image"; filename="application.pdf"
+
+< ./testdata/form-fields.pdf
+--Boundary--
+
+> {%
+    client.test("field values are read straight from the pdf", function () {
+        client.assert(response.status === 200, "status " + response.status);
+        client.assert(response.body.method === "acroform", "method " + response.body.method);
+        client.assert(response.body.image.pages === 3, "pages " + response.body.image.pages);
+
+        const found = response.body.detections;
+        client.assert(found.length === 4, "found " + found.length);
+        // The radio group, push button and text field must not be reported.
+        client.assert(found.map(d => d.name).join(",") ===
+            "agree,subscribe,consent.marketing,third", "names " + found.map(d => d.name));
+        // A PDF states its own answers, so nothing is estimated.
+        client.assert(found.every(d => d.confidence === 1), "confidence below 1");
+    });
+%}
+
+### A scanned PDF: no fields, so pdftoppm renders it and the detector runs
+POST {{host}}/detect
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="image"; filename="scan.pdf"
+
+< ./testdata/scanned-form.pdf
+--Boundary--
+
+> {%
+    client.test("scanned page falls back to the pixel detector", function () {
+        client.assert(response.status === 200, "status " + response.status);
+        client.assert(response.body.method === "pixels", "method " + response.body.method);
+        const found = response.body.detections;
+        client.assert(found.length === 8, "found " + found.length);
+        client.assert(found.filter(d => d.checked).length === 3,
+            "checked " + found.filter(d => d.checked).length);
+        client.assert(found.every(d => d.page === 1), "unexpected page number");
+    });
+%}
+
+### A PDF whose form fields are invalid: falls through to the rasterizer
+POST {{host}}/detect
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="image"; filename="odd.pdf"
+
+< ./testdata/scanned-broken-fields.pdf
+--Boundary--
+
+> {%
+    client.test("unreadable fields do not fail the request", function () {
+        client.assert(response.status === 200, "status " + response.status);
+        client.assert(response.body.method === "pixels", "method " + response.body.method);
+        client.assert(response.body.detections.length === 8,
+            "found " + response.body.detections.length);
+    });
+%}
+
+### Wrong field name -> 400
+POST {{host}}/detect
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="photo"; filename="form.png"
+
+< ./testdata/form.png
+--Boundary--
+
+> {%
+    client.test("the file field must be called image", function () {
+        client.assert(response.status === 400, "status " + response.status);
+        client.assert(response.body.error.includes("image"), response.body.error);
+    });
+%}
+
+### A JSON body instead of an upload -> 400
+POST {{host}}/detect
+Content-Type: application/json
+
+{
+  "image_url": "https://example.com/form.png"
+}
+
+> {%
+    client.test("only multipart uploads are accepted", function () {
+        client.assert(response.status === 400, "status " + response.status);
+        client.assert(response.body.error.includes("multipart/form-data"), response.body.error);
+    });
+%}
+
+### Something that is not an image at all -> 415
+# The declared part Content-Type says png; the sniffed bytes decide otherwise.
+POST {{host}}/detect
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="image"; filename="not-an-image.png"
+Content-Type: image/png
+
+< ./testdata/gen_fixtures.py
+--Boundary--
+
+> {%
+    client.test("the sniffed type wins over the declared one", function () {
+        client.assert(response.status === 415, "status " + response.status);
+        client.assert(response.body.error.includes("unsupported type"), response.body.error);
+    });
+%}
+
+### GET is not routed -> 405
+GET {{host}}/detect
+
+> {%
+    client.test("detect is POST only", function () {
+        client.assert(response.status === 405, "status " + response.status);
+    });
+%}

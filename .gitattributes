@@ -1,0 +1,5 @@
+# PDF xref tables store byte offsets, so any line-ending conversion corrupts
+# them. Keep every fixture byte-exact.
+*.pdf binary
+*.png binary
+*.webp binary
