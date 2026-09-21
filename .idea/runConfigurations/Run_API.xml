@@ -7,9 +7,21 @@
       <!-- pdftoppm lives in Homebrew's bin, which GoLand does not inherit when
            launched from the Dock rather than a shell. -->
       <env name="PATH" value="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" />
+      <!-- gocv links against OpenCV through cgo, and opencv@4 is keg-only, so
+           pkg-config has to be pointed at it explicitly. -->
+      <env name="PKG_CONFIG_PATH" value="/opt/homebrew/opt/opencv@4/lib/pkgconfig" />
     </envs>
-    <kind value="PACKAGE" />
-    <package value="homevision" />
+    <EXTENSION ID="net.ashald.envfile">
+      <option name="IS_ENABLED" value="false" />
+      <option name="IS_SUBST" value="false" />
+      <option name="IS_PATH_MACRO_SUPPORTED" value="false" />
+      <option name="IS_IGNORE_MISSING_FILES" value="false" />
+      <option name="IS_ENABLE_EXPERIMENTAL_INTEGRATIONS" value="false" />
+      <ENTRIES>
+        <ENTRY IS_ENABLED="true" PARSER="runconfig" IS_EXECUTABLE="false" />
+      </ENTRIES>
+    </EXTENSION>
+    <kind value="DIRECTORY" />
     <directory value="$PROJECT_DIR$" />
     <filePath value="$PROJECT_DIR$/main.go" />
     <method v="2" />

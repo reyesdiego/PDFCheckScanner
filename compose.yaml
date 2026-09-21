@@ -1,0 +1,19 @@
+services:
+  api:
+    build: .
+    image: homevision-api
+    # The container listens on 8080; change the left-hand side to move the
+    # host port. ADDR is here so `docker compose up` matches `make run`.
+    ports:
+      - "${PORT:-8080}:8080"
+    restart: unless-stopped
+    # /detect only answers POST, so a GET is the cheapest proof that the
+    # router is up: chi replies 405 rather than 404.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/detect | grep -q 405
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

@@ -120,7 +120,7 @@ func TestDetectAcceptsPNGUpload(t *testing.T) {
 	if got.Image.Filename != "front-door.png" {
 		t.Errorf("filename = %q", got.Image.Filename)
 	}
-	if got.Detections == nil {
+	if got.Boxes == nil {
 		t.Error("detections is null, want an empty array")
 	}
 	if got.RequestID == "" {
@@ -311,18 +311,15 @@ func TestDetectEndpointReturnsCheckboxes(t *testing.T) {
 	if got.Image.Width != 220 || got.Image.Height != 80 {
 		t.Errorf("dimensions = %dx%d, want 220x80", got.Image.Width, got.Image.Height)
 	}
-	if len(got.Detections) != 2 {
-		t.Fatalf("got %d detections, want 2: %+v", len(got.Detections), got.Detections)
+	if len(got.Boxes) != 2 {
+		t.Fatalf("got %d detections, want 2: %+v", len(got.Boxes), got.Boxes)
 	}
-	if got.Detections[0].Checked || !got.Detections[1].Checked {
+	if got.Boxes[0].Checked || !got.Boxes[1].Checked {
 		t.Errorf("checked = [%v %v], want [false true]",
-			got.Detections[0].Checked, got.Detections[1].Checked)
+			got.Boxes[0].Checked, got.Boxes[1].Checked)
 	}
-	if b := got.Detections[1].Box; b.X != 90 || b.Y != 20 || b.Width != 24 || b.Height != 24 {
+	if b := got.Boxes[1].Box; b.X != 90 || b.Y != 20 || b.Width != 24 || b.Height != 24 {
 		t.Errorf("second box = %+v, want {90 20 24 24}", b)
-	}
-	if got.Detections[0].Label != "checkbox" {
-		t.Errorf("label = %q, want checkbox", got.Detections[0].Label)
 	}
 }
 
@@ -371,14 +368,14 @@ func TestDetectEndpointReadsPDFFormFields(t *testing.T) {
 		t.Errorf("width/height = %dx%d, want them omitted for a pdf",
 			got.Image.Width, got.Image.Height)
 	}
-	if len(got.Detections) != 4 {
-		t.Fatalf("got %d detections, want 4: %+v", len(got.Detections), got.Detections)
+	if len(got.Boxes) != 4 {
+		t.Fatalf("got %d detections, want 4: %+v", len(got.Boxes), got.Boxes)
 	}
-	if !got.Detections[0].Checked || got.Detections[0].Page != 1 {
-		t.Errorf("first = %+v, want checked on page 1", got.Detections[0])
+	if !got.Boxes[0].Checked || got.Boxes[0].Page != 1 {
+		t.Errorf("first = %+v, want checked on page 1", got.Boxes[0])
 	}
-	if got.Detections[0].Name != "agree" {
-		t.Errorf("name = %q, want agree", got.Detections[0].Name)
+	if got.Boxes[0].Name != "agree" {
+		t.Errorf("name = %q, want agree", got.Boxes[0].Name)
 	}
 }
 
@@ -398,11 +395,11 @@ func TestDetectEndpointRastersScannedPDF(t *testing.T) {
 	if got.Image.Pages != 1 {
 		t.Errorf("pages = %d, want 1", got.Image.Pages)
 	}
-	if len(got.Detections) != 8 {
-		t.Fatalf("got %d detections, want 8", len(got.Detections))
+	if len(got.Boxes) != 8 {
+		t.Fatalf("got %d detections, want 8", len(got.Boxes))
 	}
 	checked := 0
-	for _, d := range got.Detections {
+	for _, d := range got.Boxes {
 		if d.Page != 1 {
 			t.Errorf("page = %d, want 1", d.Page)
 		}
@@ -458,5 +455,75 @@ func TestOnlyDetectIsRouted(t *testing.T) {
 	newRouter().ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("GET /: status = %d, want 404", rec.Code)
+	}
+}
+
+// The response shape is specified externally, so pin the exact wire format:
+// a "boxes" array of {"bbox": [x1,y1,x2,y2], "is_checked": bool}.
+func TestResponseWireFormat(t *testing.T) {
+	raw, err := json.Marshal(detection{
+		Box:        box{X: 10, Y: 20, Width: 30, Height: 35},
+		Checked:    true,
+		Confidence: 0.97,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"bbox":[10,20,40,55],"is_checked":true,"confidence":0.97}`; string(raw) != want {
+		t.Errorf("detection JSON = %s,\n                 want %s", raw, want)
+	}
+
+	// The second corner is exclusive, so it round-trips back to the same size.
+	var back detection
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Box != (box{X: 10, Y: 20, Width: 30, Height: 35}) {
+		t.Errorf("round-tripped to %+v", back.Box)
+	}
+}
+
+func TestDetectEndpointUsesSpecifiedKeys(t *testing.T) {
+	form := blankForm(120, 80)
+	drawBox(form, 20, 20, 28, 2)
+	drawCross(form, 20, 20, 28)
+	var content bytes.Buffer
+	if err := png.Encode(&content, form); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := upload(t, imageField, "one.png", content.Bytes())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body)
+	}
+
+	// Decode loosely, so this fails if a key is renamed rather than silently
+	// unmarshalling into a zero value.
+	var loose struct {
+		Boxes []struct {
+			BBox      []int `json:"bbox"`
+			IsChecked bool  `json:"is_checked"`
+		} `json:"boxes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &loose); err != nil {
+		t.Fatal(err)
+	}
+	if len(loose.Boxes) != 1 {
+		t.Fatalf("got %d boxes: %s", len(loose.Boxes), rec.Body)
+	}
+	got := loose.Boxes[0]
+	if len(got.BBox) != 4 {
+		t.Fatalf("bbox = %v, want four corners", got.BBox)
+	}
+	if want := []int{20, 20, 48, 48}; got.BBox[0] != want[0] || got.BBox[1] != want[1] ||
+		got.BBox[2] != want[2] || got.BBox[3] != want[3] {
+		t.Errorf("bbox = %v, want %v", got.BBox, want)
+	}
+	if !got.IsChecked {
+		t.Error("is_checked = false, want true")
+	}
+	if strings.Contains(rec.Body.String(), `"detections"`) ||
+		strings.Contains(rec.Body.String(), `"checked":`) {
+		t.Errorf("response still carries the old keys: %s", rec.Body)
 	}
 }

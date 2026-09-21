@@ -1,0 +1,53 @@
+%PDF-1.7
+1 0 obj
+<</Type/Catalog/Pages 2 0 R>>
+endobj
+2 0 obj
+<</Type/Pages/Kids[3 0 R]/Count 1>>
+endobj
+3 0 obj
+<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 5 0 R/F2 6 0 R>>>>/Contents 4 0 R>>
+endobj
+4 0 obj
+<</Length 793>>
+stream
+BT /F1 26 Tf 60 700 Td (Backend Challenge: Checkbox Detection) Tj ET
+BT /F2 11 Tf 60 650 Td (One of the active areas of development is extracting structured data) Tj ET
+BT /F2 11 Tf 60 630 Td (from document images. Detect the location of all checkboxes, filled and) Tj ET
+BT /F2 11 Tf 60 610 Td (unfilled, and classify each one. Bold headings, round letters such as o,) Tj ET
+BT /F2 11 Tf 60 590 Td (e, a, g and D, and digits 0 and 8 must not be reported as boxes.) Tj ET
+0.9 w
+60 560 14 14 re S
+160 560 14 14 re S
+163.08 563.08 m 170.92 570.92 l S
+170.92 563.08 m 163.08 570.92 l S
+260 560 14 14 re S
+263.08 563.08 m 270.92 570.92 l S
+270.92 563.08 m 263.08 570.92 l S
+60 520 14 14 re S
+160 520 14 14 re S
+260 520 14 14 re S
+263.08 523.08 m 270.92 530.92 l S
+270.92 523.08 m 263.08 530.92 l S
+endstream
+endobj
+5 0 obj
+<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Bold>>
+endobj
+6 0 obj
+<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000009 00000 n 
+0000000054 00000 n 
+0000000105 00000 n 
+0000000226 00000 n 
+0000001068 00000 n 
+0000001136 00000 n 
+trailer
+<</Size 7/Root 1 0 R>>
+startxref
+1199
+%%EOF

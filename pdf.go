@@ -21,10 +21,18 @@ import (
 )
 
 const (
-	// rasterDPI is what pdftoppm renders at. A 3-4mm print checkbox lands at
-	// 24-32px here, comfortably above the detector's 8px floor, where 72 DPI
-	// would put it right on the edge.
-	rasterDPI = 200
+	// rasterDPI is what pdftoppm renders at. At 200 DPI the checkboxes on a real
+	// appraisal form come out 11-13px, small enough that anti-aliasing fills
+	// their interiors and an empty box reads as marked. At 300 they are 17-19px
+	// with interiors that measure 0.01-0.11 ink, which is what the detector
+	// needs to tell empty from marked.
+	rasterDPI = 300
+
+	// minRasterDPI is the floor for the reduced render an outsized page gets.
+	// Below this a checkbox is smaller than MinSide and there is nothing to
+	// find, so a page that cannot fit maxPixels at this resolution is one the
+	// detector could not have read anyway.
+	minRasterDPI = 100
 
 	// maxPDFPages bounds how much work one upload can ask for.
 	maxPDFPages = 10
@@ -132,7 +140,6 @@ func checkboxFromWidget(pctx *model.Context, widget types.Dict, attrs *model.Inh
 	}
 
 	return detection{
-		Label: "checkbox",
 		// The PDF states the answer outright; there is nothing to be unsure of.
 		Confidence: 1,
 		Box:        rectToPixels(rect, attrs),
@@ -320,7 +327,7 @@ func rasterCheckboxes(ctx context.Context, path string, pages int) ([]detection,
 		}
 		rendered = max(rendered, page)
 
-		pageDets, err := detectPageImage(file, page)
+		pageDets, err := detectPage(ctx, path, dir, file, page)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -330,36 +337,126 @@ func rasterCheckboxes(ctx context.Context, path string, pages int) ([]detection,
 	return dets, rendered, nil
 }
 
-func detectPageImage(file string, page int) ([]detection, error) {
+// detectPage runs the detector over one rendered page.
+//
+// A page with an outsized MediaBox rasterizes into something far bigger than
+// an uploaded image is allowed to be. Such a page is rendered again on its
+// own, at whatever resolution does fit, and the boxes it yields are scaled
+// back up: dropping it instead would answer 200 OK with the page silently
+// contributing nothing, and at 300 DPI the cutoff falls on paper sizes people
+// really do use - a tabloid plat or an ARCH-B exhibit.
+//
+// TODO: the size check still comes after the fact, so the first render of an
+// outsized page has already cost pdftoppm the memory. Reading page dimensions
+// up front would bound that too, and would save the second render.
+func detectPage(ctx context.Context, pdfPath, dir, file string, page int) ([]detection, error) {
+	cfg, err := pageConfig(file)
+	if err != nil {
+		return nil, fmt.Errorf("decode page %d: %w", page, err)
+	}
+
+	scale := 1.0
+	if cfg.Width*cfg.Height > maxPixels {
+		file, scale, err = renderPageToFit(ctx, pdfPath, dir, page, cfg)
+		if err != nil {
+			return nil, err
+		}
+		if file == "" {
+			return nil, nil
+		}
+	}
+
+	return detectPageImage(file, page, scale)
+}
+
+// renderPageToFit re-renders one page at the highest DPI at or below
+// rasterDPI that keeps it under maxPixels, and returns the new file along
+// with the factor mapping its pixels back to rasterDPI. An empty filename
+// means the page cannot be made to fit at a resolution the detector could
+// still read.
+func renderPageToFit(ctx context.Context, pdfPath, dir string, page int, cfg image.Config) (string, float64, error) {
+	// Area scales with the square of the DPI. The margin absorbs pdftoppm
+	// rounding the pixel dimensions up.
+	fit := 0.98 * math.Sqrt(float64(maxPixels)/float64(cfg.Width*cfg.Height))
+	dpi := int(math.Floor(rasterDPI * fit))
+	if dpi < minRasterDPI {
+		return "", 0, nil
+	}
+
+	prefix := filepath.Join(dir, fmt.Sprintf("fit-%d", page))
+	cmd := exec.CommandContext(ctx, rasterizer,
+		"-png",
+		"-r", strconv.Itoa(dpi),
+		"-f", strconv.Itoa(page),
+		"-l", strconv.Itoa(page),
+		pdfPath, prefix,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", 0, ctxErr
+		}
+		return "", 0, fmt.Errorf("%s page %d: %w: %s", rasterizer, page, err, strings.TrimSpace(string(out)))
+	}
+
+	files, err := filepath.Glob(prefix + "-*.png")
+	if err != nil {
+		return "", 0, err
+	}
+	if len(files) == 0 {
+		return "", 0, fmt.Errorf("%s produced no output for page %d", rasterizer, page)
+	}
+
+	cfg, err = pageConfig(files[0])
+	if err != nil {
+		return "", 0, fmt.Errorf("decode page %d: %w", page, err)
+	}
+	if cfg.Width*cfg.Height > maxPixels {
+		return "", 0, nil
+	}
+	return files[0], float64(rasterDPI) / float64(dpi), nil
+}
+
+func pageConfig(file string) (image.Config, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return image.Config{}, err
+	}
+	defer f.Close()
+
+	cfg, _, err := image.DecodeConfig(f)
+	return cfg, err
+}
+
+// detectPageImage detects on a rendered page, multiplying the boxes by scale
+// so that every page reports pixels at rasterDPI however it was rendered.
+func detectPageImage(file string, page int, scale float64) ([]detection, error) {
 	f, err := os.Open(file)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 
-	cfg, _, err := image.DecodeConfig(f)
-	if err != nil {
-		return nil, fmt.Errorf("decode page %d: %w", page, err)
-	}
-	// A page with an outsized MediaBox can rasterize into something far bigger
-	// than an uploaded image is allowed to be; skip it rather than scan it.
-	if cfg.Width*cfg.Height > maxPixels {
-		return nil, nil
-	}
-	if _, err := f.Seek(0, 0); err != nil {
-		return nil, err
-	}
-
 	img, _, err := image.Decode(f)
 	if err != nil {
 		return nil, fmt.Errorf("decode page %d: %w", page, err)
 	}
 
-	dets := detector.Detect(img)
+	dets, err := detector.Detect(img)
+	if err != nil {
+		return nil, fmt.Errorf("detect page %d: %w", page, err)
+	}
 	for i := range dets {
 		dets[i].Page = page
+		if scale != 1 {
+			dets[i].Box = scaleBox(dets[i].Box, scale)
+		}
 	}
 	return dets, nil
+}
+
+func scaleBox(b box, scale float64) box {
+	at := func(n int) int { return int(math.Round(float64(n) * scale)) }
+	return box{X: at(b.X), Y: at(b.Y), Width: at(b.Width), Height: at(b.Height)}
 }
 
 // sortPageOrder puts detections in page order, keeping the per-page reading

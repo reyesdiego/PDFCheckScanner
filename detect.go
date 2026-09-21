@@ -57,8 +57,8 @@ type detectResponse struct {
 	Image     imageInfo `json:"image"`
 	// Method is how the checkboxes were found: "acroform" when read from a
 	// PDF's own form fields, "pixels" when found by the image detector.
-	Method     string      `json:"method"`
-	Detections []detection `json:"detections"`
+	Method string      `json:"method"`
+	Boxes  []detection `json:"boxes"`
 }
 
 type imageInfo struct {
@@ -73,10 +73,11 @@ type imageInfo struct {
 }
 
 type detection struct {
-	Label      string  `json:"label"`
+	Box     box  `json:"bbox"`
+	Checked bool `json:"is_checked"`
+	// Confidence is 1 when read from a PDF's form fields, and an estimate from
+	// the detector's shape scoring otherwise.
 	Confidence float64 `json:"confidence"`
-	Box        box     `json:"box"`
-	Checked    bool    `json:"checked"`
 	// Page is the 1-based page a PDF detection came from, omitted for images.
 	Page int `json:"page,omitempty"`
 	// Name is the PDF's fully qualified field name, set only on the AcroForm
@@ -84,13 +85,40 @@ type detection struct {
 	Name string `json:"name,omitempty"`
 }
 
-// box is an axis-aligned bounding box in pixels, origin at the top-left. For
-// PDFs the pixels are at rasterDPI, so both PDF paths agree on coordinates.
+// box is an axis-aligned bounding box in pixels with the origin at the image's
+// top-left. For PDFs the pixels are at rasterDPI (300), so both PDF paths
+// agree on coordinates.
+//
+// It is held as origin plus size, which is what the detector and the PDF
+// geometry work in, and serialised as the [x1 y1 x2 y2] corner pair the API
+// promises. The second corner is exclusive: x2 is x1+width, so the width is
+// x2-x1 and a 1px box is [x, y, x+1, y+1].
 type box struct {
-	X      int `json:"x"`
-	Y      int `json:"y"`
-	Width  int `json:"width"`
-	Height int `json:"height"`
+	X      int
+	Y      int
+	Width  int
+	Height int
+}
+
+func (b box) MarshalJSON() ([]byte, error) {
+	return json.Marshal([4]int{b.X, b.Y, b.X + b.Width, b.Y + b.Height})
+}
+
+func (b *box) UnmarshalJSON(data []byte) error {
+	var corners [4]int
+	if err := json.Unmarshal(data, &corners); err != nil {
+		return err
+	}
+	if corners[2] < corners[0] || corners[3] < corners[1] {
+		return fmt.Errorf("bbox %v has its corners the wrong way round", corners)
+	}
+	*b = box{
+		X:      corners[0],
+		Y:      corners[1],
+		Width:  corners[2] - corners[0],
+		Height: corners[3] - corners[1],
+	}
+	return nil
 }
 
 func handleDetect(w http.ResponseWriter, r *http.Request) {
@@ -153,11 +181,19 @@ func handleDetect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	boxes, err := detector.Detect(img)
+	if err != nil {
+		// The image was fine; examining it was not. Reporting no checkboxes
+		// here would be indistinguishable from a blank form.
+		writeError(w, http.StatusInternalServerError, "could not examine the uploaded image")
+		return
+	}
+
 	writeJSON(w, http.StatusOK, detectResponse{
-		RequestID:  middleware.GetReqID(r.Context()),
-		Image:      info,
-		Method:     methodPixels,
-		Detections: detector.Detect(img),
+		RequestID: middleware.GetReqID(r.Context()),
+		Image:     info,
+		Method:    methodPixels,
+		Boxes:     boxes,
 	})
 }
 
@@ -186,10 +222,10 @@ func handlePDF(w http.ResponseWriter, r *http.Request, file io.Reader, info imag
 	info.Pages = pages
 
 	writeJSON(w, http.StatusOK, detectResponse{
-		RequestID:  middleware.GetReqID(r.Context()),
-		Image:      info,
-		Method:     method,
-		Detections: dets,
+		RequestID: middleware.GetReqID(r.Context()),
+		Image:     info,
+		Method:    method,
+		Boxes:     dets,
 	})
 }
 

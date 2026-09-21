@@ -142,3 +142,62 @@ for i in range(4):
     checkbox(40 + i * 100, 40, 28, 2, i in IMG_CHECKED)
 write_png("testdata/form.png", W, H, px)
 print("form.png: 4 boxes,", len(IMG_CHECKED), "checked")
+
+
+# ----------------------------------------------------- text-bearing fixtures
+# Real glyphs, not drawn shapes: the content stream asks for Helvetica and
+# pdftoppm rasterizes it, so the tests see genuine anti-aliased letters. This
+# matters because the letters that break a geometric checkbox detector are
+# exactly the ones with straight stems and near-rectangular counters - B, D,
+# O, 0, 8 - and crude hand-drawn approximations of them do not reproduce it.
+HEADING = "Backend Challenge: Checkbox Detection"
+BODY = [
+    "One of the active areas of development is extracting structured data",
+    "from document images. Detect the location of all checkboxes, filled and",
+    "unfilled, and classify each one. Bold headings, round letters such as o,",
+    "e, a, g and D, and digits 0 and 8 must not be reported as boxes.",
+]
+
+def text_page(lines_big, lines_small, boxes):
+    """Builds a page content stream with real text and vector checkboxes."""
+    ops = []
+    y = 700
+    for s in lines_big:
+        ops.append(f"BT /F1 26 Tf 60 {y} Td ({s}) Tj ET")
+        y -= 40
+    y -= 10
+    for s in lines_small:
+        ops.append(f"BT /F2 11 Tf 60 {y} Td ({s}) Tj ET")
+        y -= 20
+    ops.append("0.9 w")
+    for (x, by, size, checked) in boxes:
+        ops.append(f"{x} {by} {size} {size} re S")
+        if checked:
+            i = size * 0.22
+            ops.append(f"{x+i} {by+i} m {x+size-i} {by+size-i} l S")
+            ops.append(f"{x+size-i} {by+i} m {x+i} {by+size-i} l S")
+    return "\n".join(ops).encode()
+
+def build_text_pdf(path, boxes):
+    content = text_page([HEADING], BODY, boxes)
+    objs = [
+        (1, b"<</Type/Catalog/Pages 2 0 R>>"),
+        (2, b"<</Type/Pages/Kids[3 0 R]/Count 1>>"),
+        (3, b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]"
+            b"/Resources<</Font<</F1 5 0 R/F2 6 0 R>>>>/Contents 4 0 R>>"),
+        (4, stream("", content)),
+        (5, b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Bold>>"),
+        (6, b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>"),
+    ]
+    open(path, "wb").write(build(objs, 1))
+
+# prose only: the false-positive canary. Nothing here is a checkbox.
+build_text_pdf("testdata/prose.pdf", [])
+print("prose.pdf: text only, 0 checkboxes")
+
+# text and checkboxes together, which is what a real form looks like
+MIXED = [(60, 560, 14, False), (160, 560, 14, True), (260, 560, 14, True),
+         (60, 520, 14, False), (160, 520, 14, False), (260, 520, 14, True)]
+build_text_pdf("testdata/mixed.pdf", MIXED)
+print("mixed.pdf: text plus %d checkboxes, %d checked"
+      % (len(MIXED), sum(1 for b in MIXED if b[3])))

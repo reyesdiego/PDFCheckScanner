@@ -1,38 +1,103 @@
 package main
 
 import (
+	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
 	"math"
-	"slices"
 	"sort"
+
+	"gocv.io/x/gocv"
 )
 
-// Detector finds checkboxes in a form and reports whether each one is marked.
+// Detector finds checkboxes in a document image and reports whether each one
+// is marked.
 //
-// It works geometrically rather than with a trained model: the image is
-// binarized, split into connected runs of ink, and each run is scored on how
-// much it looks like a hollow square. A candidate is "checked" when enough ink
-// sits inside its border. The assumption is dark ink on a lighter background,
-// which is what scans and photos of paper forms give you.
+// It looks for quadrilaterals rather than for square-ish blobs of ink. Every
+// contour in the binarized page is fitted with a polygon, and a candidate has
+// to come back as a four-sided shape that fills its own bounding box. That is
+// what separates a ruled box from a letter: "D" and "o" are as square as a
+// checkbox and have hollow middles, but neither fits a quadrilateral.
+//
+// Contours also give the interiors for free. An unchecked box encloses a hole,
+// and a hole is a contour in its own right, so a box still registers when its
+// border runs into a table rule and its outer contour is lost to the grid.
 type Detector struct {
-	// MinSide is the smallest checkbox side, in pixels, worth reporting.
+	// MinSide is the smallest checkbox side, in pixels, worth reporting. Below
+	// roughly 12px anti-aliasing fills a box's interior and there is nothing
+	// left to measure, so scans want to be 200-300 DPI. PDFs are rasterized at
+	// rasterDPI for this reason.
 	MinSide int
-	// MaxSideFrac caps a checkbox side as a fraction of the shorter image edge.
+	// MaxSide is the floor on the largest checkbox side, in pixels. A checkbox
+	// is a physical thing, under about a centimetre across, which is ~120px at
+	// the 300 DPI that PDFs are rasterized at, and an absolute bound keeps
+	// table cells and page frames out better than a relative one. But an
+	// upload to the image endpoint carries no DPI, so the bound cannot be
+	// absolute alone: a 16pt box scanned at 600 DPI is ~133px and would be
+	// thrown out, leaving a perfectly good scan with no detections at all. The
+	// effective cap is therefore the larger of this and MaxSideShortEdgeFrac.
+	MaxSide int
+	// MaxSideShortEdgeFrac scales the cap with the image, so a page scanned at
+	// twice the DPI gets twice the allowance. A centimetre is about 4% of the
+	// short edge of a portrait letter page, whatever resolution it was scanned
+	// at; the value is set loosely above that. It only ever raises the cap
+	// above MaxSide, so a crop the size of one checkbox is unaffected.
+	MaxSideShortEdgeFrac float64
+	// MaxSideFrac additionally stops a box from being most of the image, for
+	// crops barely bigger than one checkbox. It applies to the shorter edge,
+	// so it must stay generous: a single form row cropped out of a page is
+	// wide and short, and at 0.5 the height of a 58px-tall strip capped
+	// detection at 29px and rejected every 33px checkbox in it.
 	MaxSideFrac float64
 	// MinSquareness is the lowest min(w,h)/max(w,h) a candidate may have.
 	MinSquareness float64
-	// MinBorderScore is the fraction of the bounding-box ring that must be inked.
-	MinBorderScore float64
+	// MinRectangularity is how much of its bounding box the candidate's convex
+	// hull must enclose. A rectangle scores 1; a triangle or a curve far less.
+	MinRectangularity float64
+	// MinEdgeCoverage is the fraction of each side of the bounding box that
+	// must carry ink near it. A hull is blind to what is missing from the
+	// middle of a side, and blocky capitals like H, E and N have rectangular
+	// hulls, so this is what keeps them out.
+	MinEdgeCoverage float64
+	// ApproxEpsilonFrac is the polygon-fitting tolerance, as a fraction of the
+	// contour's perimeter. It has to be tight: at 0.05 the counter of a bold
+	// "B" or "D" fits a quadrilateral and heading text reads as checkboxes,
+	// while at 0.02 the prose pages of a document come back empty and the forms
+	// keep all but a handful of their boxes.
+	ApproxEpsilonFrac float64
 	// MaxInteriorInk rejects candidates whose interior is essentially solid,
 	// which is a blob or a glyph rather than a box with a mark in it.
 	MaxInteriorInk float64
-	// CheckedInk is the interior ink fraction at which a box counts as checked.
+	// CheckedInk is the ink fraction at which the central half of a box counts
+	// as marked.
 	CheckedInk float64
+	// CheckedWideInk is the same test over a wider window, inset 15%, for
+	// marks whose ink sits in the box's corners rather than its middle. A worn
+	// or scratchy X leaves blobs at the four corners and almost nothing in the
+	// centre, and the central half then reads it as empty - and, worse, reads
+	// it differently depending on how large the box is rendered.
+	CheckedWideInk float64
+	// MinConfidence rejects candidates that are mediocre on every measure at
+	// once. A hand-drawn square passes each individual gate by a hair - hull
+	// 0.81 against 0.80, coverage 0.76 against 0.75 - where a printed box
+	// clears them all comfortably, so the blended score separates the two
+	// where no single threshold can.
+	MinConfidence float64
+	// ThresholdC is how much darker than its neighbourhood a pixel must be to
+	// count as ink. Paper grain needs a generous margin: at a small value a
+	// third of a noisy scan's background crosses its local mean and the page
+	// binarizes to mush. Blurring the input first would fix that too, but it
+	// widens every stroke and inflates the reported boxes by a pixel on each
+	// side, so the margin does the work instead.
+	ThresholdC float32
 	// MaxInkFrac skips images that are mostly ink, where "dark on light" does
 	// not hold and the binarization would be meaningless.
 	MaxInkFrac float64
+	// DarkFloor is the grey level below which a pixel is ink no matter what its
+	// neighbourhood looks like. Adaptive thresholding alone hollows out large
+	// solid areas, because the middle of a blob has no local contrast.
+	DarkFloor float32
 	// MaxDetections caps how many checkboxes a single image can report.
 	MaxDetections int
 }
@@ -40,147 +105,362 @@ type Detector struct {
 // NewDetector returns a Detector tuned for checkboxes on scanned forms.
 func NewDetector() *Detector {
 	return &Detector{
-		MinSide:        8,
-		MaxSideFrac:    0.5,
-		MinSquareness:  0.65,
-		MinBorderScore: 0.75,
-		MaxInteriorInk: 0.85,
-		CheckedInk:     0.07,
-		MaxInkFrac:     0.6,
-		MaxDetections:  500,
+		MinSide:              12,
+		MaxSide:              120,
+		MaxSideShortEdgeFrac: 0.06,
+		MaxSideFrac:          0.9,
+		MinSquareness:        0.6,
+		MinRectangularity:    0.8,
+		MinEdgeCoverage:      0.75,
+		ApproxEpsilonFrac:    0.02,
+		MaxInteriorInk:       0.85,
+		CheckedInk:           0.10,
+		CheckedWideInk:       0.13,
+		MinConfidence:        0.87,
+		ThresholdC:           30,
+		MaxInkFrac:           0.6,
+		DarkFloor:            90,
+		MaxDetections:        500,
 	}
 }
 
 // Detect returns the checkboxes found in img, in reading order: top to bottom,
 // then left to right. Box coordinates are pixels from the image's top-left.
-func (d *Detector) Detect(img image.Image) []detection {
-	bm := binarize(img)
-	if bm == nil || bm.inkFrac() > d.MaxInkFrac {
-		return []detection{}
+//
+// TODO: deskew first. A rotated box still fits a quadrilateral, but its
+// bounding box no longer matches it, so rectangularity drops and the box is
+// lost. Estimating the page angle from its long lines and rotating would make
+// photographed documents work.
+//
+// TODO: erase long horizontal and vertical runs before finding contours. A
+// checkbox whose border runs into a table rule is currently found only by its
+// interior hole, which means a marked one, whose hole is broken up by the
+// mark, can be missed entirely.
+//
+// An error means the image could not be examined, which is a different answer
+// from an empty result and has to stay distinguishable from it: a caller that
+// cannot tell a blank form from a broken OpenCV call will record the wrong
+// thing and never know. An image too small to hold a checkbox, or one too
+// dark to binarize meaningfully, is not an error - it genuinely has nothing
+// to report.
+func (d *Detector) Detect(img image.Image) ([]detection, error) {
+	gray := toGray(img)
+	if gray == nil {
+		return []detection{}, nil
 	}
 
-	labels, comps := bm.components()
-	found := make([]detection, 0, len(comps))
-	for _, c := range comps {
-		if det, ok := d.classify(bm, labels, c); ok {
-			found = append(found, det)
-		}
+	src, err := gocv.ImageGrayToMatGray(gray)
+	if err != nil {
+		return nil, fmt.Errorf("convert image: %w", err)
+	}
+	defer src.Close()
+
+	ink, err := d.binarize(src)
+	if err != nil {
+		return nil, fmt.Errorf("binarize image: %w", err)
+	}
+	defer ink.Close()
+
+	if inkFraction(ink) > d.MaxInkFrac {
+		return []detection{}, nil
 	}
 
+	found := d.candidates(ink)
 	found = dedupe(found)
 	if len(found) > d.MaxDetections {
+		// dedupe leaves the list ordered by area, and a big candidate is the
+		// least likely to be a real checkbox, so capping it as it stands
+		// would throw away exactly the detections worth keeping.
+		sort.SliceStable(found, func(i, j int) bool {
+			return found[i].Confidence > found[j].Confidence
+		})
 		found = found[:d.MaxDetections]
 	}
 	sortReadingOrder(found)
+	return found, nil
+}
+
+// binarize returns a mask where ink is 255. On error it returns the zero Mat,
+// which owns nothing and must not be closed: a Mat is C++ heap memory outside
+// Go's reach, so handing back a live one the caller drops leaks it for good.
+//
+// Thresholding is local, so uneven lighting across a photographed page does
+// not need tuning per image, with an absolute floor OR-ed in so that large
+// solid marks stay solid instead of hollowing out.
+func (d *Detector) binarize(src gocv.Mat) (gocv.Mat, error) {
+	adaptive := gocv.NewMat()
+	defer adaptive.Close()
+	if err := gocv.AdaptiveThreshold(src, &adaptive, 255, gocv.AdaptiveThresholdGaussian,
+		gocv.ThresholdBinaryInv, blockSize(src.Cols(), src.Rows()), d.ThresholdC); err != nil {
+		return gocv.Mat{}, err
+	}
+
+	dark := gocv.NewMat()
+	defer dark.Close()
+	gocv.Threshold(src, &dark, d.DarkFloor, 255, gocv.ThresholdBinaryInv)
+
+	ink := gocv.NewMat()
+	if err := gocv.BitwiseOr(adaptive, dark, &ink); err != nil {
+		ink.Close()
+		return gocv.Mat{}, err
+	}
+
+	return ink, nil
+}
+
+// candidates fits a polygon to every contour and keeps the ones shaped like a
+// checkbox.
+func (d *Detector) candidates(ink gocv.Mat) []detection {
+	hierarchy := gocv.NewMat()
+	defer hierarchy.Close()
+
+	// RetrievalList returns holes alongside outlines, which is what lets an
+	// unchecked box be found by its interior when its border is welded to a
+	// table rule.
+	contours := gocv.FindContoursWithParams(ink, &hierarchy, gocv.RetrievalList, gocv.ChainApproxSimple)
+	defer contours.Close()
+
+	shortEdge := float64(min(ink.Cols(), ink.Rows()))
+	maxSide := max(d.MaxSide, int(math.Round(d.MaxSideShortEdgeFrac*shortEdge)))
+	maxSide = min(maxSide, int(d.MaxSideFrac*shortEdge))
+	found := make([]detection, 0, contours.Size())
+
+	for i := range contours.Size() {
+		c := contours.At(i)
+
+		// Fit the polygon to the convex hull, not the raw contour. Real marks
+		// overflow their box: a bold X pokes out past the border at the
+		// corners, and the outline then detours around each spike and stops
+		// being a quadrilateral - 7 corners on one real example that was
+		// otherwise a perfect 37x37 square. A hull ignores spikes and nicks.
+		hullMat := gocv.NewMat()
+		if err := gocv.ConvexHull(c, &hullMat, false, true); err != nil {
+			hullMat.Close()
+			continue
+		}
+		hull := gocv.NewPointVectorFromMat(hullMat)
+		approx := gocv.ApproxPolyDP(hull, d.ApproxEpsilonFrac*gocv.ArcLength(hull, true), true)
+		corners := approx.Size()
+		hullArea := gocv.ContourArea(hull)
+		approx.Close()
+		hull.Close()
+		hullMat.Close()
+		if corners != 4 {
+			continue
+		}
+
+		r := gocv.BoundingRect(c)
+		w, h := r.Dx(), r.Dy()
+		side := max(w, h)
+		if side < d.MinSide || side > maxSide {
+			continue
+		}
+		squareness := float64(min(w, h)) / float64(side)
+		if squareness < d.MinSquareness {
+			continue
+		}
+		rectangularity := hullArea / float64(w*h)
+		if rectangularity < d.MinRectangularity {
+			continue
+		}
+		cover, ok := edgeCoverage(ink, r)
+		if !ok || cover < d.MinEdgeCoverage {
+			continue
+		}
+
+		central, wide, ok := interiorInk(ink, r)
+		if !ok || central > d.MaxInteriorInk {
+			continue
+		}
+		checked := central >= d.CheckedInk || wide >= d.CheckedWideInk
+
+		// TODO: this ranks candidates sensibly but is not a calibrated
+		// probability. With labelled pages it should be fitted instead of
+		// weighted by hand, so callers can threshold on it meaningfully.
+		margin := math.Min(math.Abs(central-d.CheckedInk)/d.CheckedInk, 1)
+		if checked {
+			margin = 1
+		}
+		conf := 0.35*math.Min(rectangularity, 1) + 0.25*cover +
+			0.2*squareness + 0.2*margin
+		if conf < d.MinConfidence {
+			continue
+		}
+
+		found = append(found, detection{
+			Confidence: math.Round(conf*100) / 100,
+			Box:        box{X: r.Min.X, Y: r.Min.Y, Width: w, Height: h},
+			Checked:    checked,
+		})
+	}
 	return found
 }
 
-// classify scores one connected component as a checkbox candidate.
-func (d *Detector) classify(bm *bitmap, labels []int32, c component) (detection, bool) {
-	w, h := c.maxX-c.minX+1, c.maxY-c.minY+1
-	side := max(w, h)
+// interiorFrac trims this much off each dimension to leave the central half of
+// a candidate; interiorWideFrac trims less, leaving a window that still
+// excludes the border stroke but reaches into the corners. Both are floors:
+// the actual trim also has to clear the border, which on a small box is more
+// than either fraction. maxStrokeFrac bounds how much of a side the border is
+// allowed to account for, so that a solid blob does not swallow its own
+// window.
+const (
+	interiorFrac     = 0.25
+	interiorWideFrac = 0.15
+	maxStrokeFrac    = 0.25
+)
 
-	if side < d.MinSide || side > int(d.MaxSideFrac*float64(min(bm.w, bm.h))) {
-		return detection{}, false
+// strokeWidth estimates a candidate's border thickness in pixels, as the
+// longest run of ink reaching inwards from the middle of any of its four
+// sides. The midpoint of a side is where a tick or a cross is least likely to
+// touch, so what the run measures is the border itself.
+func strokeWidth(ink gocv.Mat, r image.Rectangle) int {
+	limit := max(1, int(math.Round(maxStrokeFrac*float64(max(r.Dx(), r.Dy())))))
+	run := func(at func(i int) (x, y int)) int {
+		n := 0
+		for i := range limit {
+			x, y := at(i)
+			if x < 0 || y < 0 || x >= ink.Cols() || y >= ink.Rows() || ink.GetUCharAt(y, x) == 0 {
+				break
+			}
+			n++
+		}
+		return n
 	}
-	squareness := float64(min(w, h)) / float64(side)
-	if squareness < d.MinSquareness {
-		return detection{}, false
-	}
-	border := borderScore(bm, labels, c)
-	if border < d.MinBorderScore {
-		return detection{}, false
-	}
-	fill, ok := interiorInk(bm, c)
-	if !ok || fill > d.MaxInteriorInk {
-		return detection{}, false
-	}
-
-	// How far the interior ink sits from the checked/unchecked boundary, which
-	// is what makes a faint smudge or a barely-marked box less certain.
-	margin := math.Min(math.Abs(fill-d.CheckedInk)/d.CheckedInk, 1)
-	conf := 0.5*border + 0.3*squareness + 0.2*margin
-
-	return detection{
-		Label:      "checkbox",
-		Confidence: math.Round(conf*100) / 100,
-		Box:        box{X: c.minX, Y: c.minY, Width: w, Height: h},
-		Checked:    fill >= d.CheckedInk,
-	}, true
+	midX, midY := (r.Min.X+r.Max.X)/2, (r.Min.Y+r.Max.Y)/2
+	return max(
+		max(run(func(i int) (int, int) { return midX, r.Min.Y + i }),
+			run(func(i int) (int, int) { return midX, r.Max.Y - 1 - i })),
+		max(run(func(i int) (int, int) { return r.Min.X + i, midY }),
+			run(func(i int) (int, int) { return r.Max.X - 1 - i, midY })),
+	)
 }
 
-// borderScore is the fraction of the bounding box's four edges that the
-// component actually covers. A complete rectangle scores 1; an arc, a letter
-// or a stray stroke scores much lower.
-func borderScore(bm *bitmap, labels []int32, c component) float64 {
-	w, h := c.maxX-c.minX+1, c.maxY-c.minY+1
-	band := max(1, int(math.Round(0.1*float64(max(w, h)))))
-
-	covered, total := 0, 0
-	hit := func(x0, y0, x1, y1 int) bool {
-		for y := y0; y <= y1; y++ {
-			for x := x0; x <= x1; x++ {
-				if labels[y*bm.w+x] == c.label {
-					return true
-				}
-			}
+// interiorInk is the fraction of inked pixels in the middle of a candidate.
+//
+// It deliberately measures only the central half, not everything inside the
+// border. A border's own anti-aliasing bleeds a pixel or two inwards, which is
+// enough to put the interior of a 28px box at 0.135 ink while a thin tick mark
+// in the same box reads 0.135 too. The middle stays clean: across a real form
+// the measure comes out bimodal, 0.00 for empty boxes and 0.30-0.40 for marked
+// ones, and a thin cross measures 0.26 against an empty box's 0.00.
+//
+// Both windows are inset past the measured border rather than by the fraction
+// alone. A fixed fraction only clears the stroke on a big box: at MinSide a
+// 3px border is more than 15% of the side, so the wide window would contain
+// the border and read an empty box at 0.36 ink - well past CheckedWideInk,
+// and reported as marked.
+func interiorInk(ink gocv.Mat, r image.Rectangle) (central, wide float64, ok bool) {
+	stroke := strokeWidth(ink, r)
+	measure := func(frac float64) (float64, bool) {
+		dx := inset(frac, r.Dx(), stroke)
+		dy := inset(frac, r.Dy(), stroke)
+		in := image.Rect(r.Min.X+dx, r.Min.Y+dy, r.Max.X-dx, r.Max.Y-dy).
+			Intersect(image.Rect(0, 0, ink.Cols(), ink.Rows()))
+		if in.Dx() < 1 || in.Dy() < 1 {
+			return 0, false
 		}
-		return false
+		roi := ink.Region(in)
+		defer roi.Close()
+		return float64(gocv.CountNonZero(roi)) / float64(in.Dx()*in.Dy()), true
 	}
 
-	for x := c.minX; x <= c.maxX; x++ {
-		total += 2
-		if hit(x, c.minY, x, min(c.minY+band, c.maxY)) {
-			covered++
-		}
-		if hit(x, max(c.maxY-band, c.minY), x, c.maxY) {
-			covered++
-		}
+	central, ok = measure(interiorFrac)
+	if !ok {
+		return 0, 0, false
 	}
-	for y := c.minY; y <= c.maxY; y++ {
-		total += 2
-		if hit(c.minX, y, min(c.minX+band, c.maxX), y) {
-			covered++
-		}
-		if hit(max(c.maxX-band, c.minX), y, c.maxX, y) {
-			covered++
-		}
+	wide, ok = measure(interiorWideFrac)
+	return central, wide, ok
+}
+
+// inset is how far in from one edge a measurement window starts: the larger of
+// the requested fraction and one pixel clear of the border, but never so far
+// that nothing is left to measure - an unmeasurable candidate is dropped
+// entirely, which is worse than reading a cramped window.
+func inset(frac float64, dim, stroke int) int {
+	n := max(int(math.Round(frac*float64(dim))), stroke+1)
+	return min(n, max((dim-1)/2, 0))
+}
+
+// edgeCoverage returns the weakest of the four sides of r, each measured as the
+// fraction of that side's length carrying ink within a thin band of the edge.
+// A ruled box covers all four sides end to end, even with nicks in the stroke.
+// A letter does not: the top and bottom of an "H" are empty between its stems.
+func edgeCoverage(ink gocv.Mat, r image.Rectangle) (float64, bool) {
+	r = r.Intersect(image.Rect(0, 0, ink.Cols(), ink.Rows()))
+	if r.Dx() < 3 || r.Dy() < 3 {
+		return 0, false
 	}
+	band := max(1, int(math.Round(0.12*float64(max(r.Dx(), r.Dy())))))
+
+	// Reducing a band to its brightest value per column, or per row, says
+	// which columns and rows carry any ink at all near that edge.
+	strip := func(sub image.Rectangle, dim int) float64 {
+		roi := ink.Region(sub)
+		defer roi.Close()
+
+		reduced := gocv.NewMat()
+		defer reduced.Close()
+		if err := gocv.Reduce(roi, &reduced, dim, gocv.ReduceMax, gocv.MatTypeCV8U); err != nil {
+			return 0
+		}
+		total := reduced.Rows() * reduced.Cols()
+		if total == 0 {
+			return 0
+		}
+		return float64(gocv.CountNonZero(reduced)) / float64(total)
+	}
+
+	top := image.Rect(r.Min.X, r.Min.Y, r.Max.X, min(r.Min.Y+band, r.Max.Y))
+	bottom := image.Rect(r.Min.X, max(r.Max.Y-band, r.Min.Y), r.Max.X, r.Max.Y)
+	left := image.Rect(r.Min.X, r.Min.Y, min(r.Min.X+band, r.Max.X), r.Max.Y)
+	right := image.Rect(max(r.Max.X-band, r.Min.X), r.Min.Y, r.Max.X, r.Max.Y)
+
+	return min(
+		min(strip(top, 0), strip(bottom, 0)),
+		min(strip(left, 1), strip(right, 1)),
+	), true
+}
+
+func inkFraction(ink gocv.Mat) float64 {
+	total := ink.Cols() * ink.Rows()
 	if total == 0 {
 		return 0
 	}
-	return float64(covered) / float64(total)
+	return float64(gocv.CountNonZero(ink)) / float64(total)
 }
 
-// interiorInk is the fraction of inked pixels strictly inside a candidate's
-// border. It counts all ink, not just this component's, so a tick mark that
-// never touches the box still registers.
-func interiorInk(bm *bitmap, c component) (float64, bool) {
-	side := max(c.maxX-c.minX+1, c.maxY-c.minY+1)
-	inset := max(2, int(math.Round(0.15*float64(side))))
-
-	x0, x1 := c.minX+inset, c.maxX-inset
-	y0, y1 := c.minY+inset, c.maxY-inset
-	if x1 < x0 || y1 < y0 {
-		return 0, false
+// toGray flattens img onto a white background, so that a transparent PNG reads
+// as paper rather than as solid ink.
+func toGray(img image.Image) *image.Gray {
+	b := img.Bounds()
+	if b.Dx() < 3 || b.Dy() < 3 {
+		return nil
 	}
-
-	ink := 0
-	for y := y0; y <= y1; y++ {
-		row := y * bm.w
-		for x := x0; x <= x1; x++ {
-			if bm.ink[row+x] {
-				ink++
-			}
-		}
-	}
-	return float64(ink) / float64((x1-x0+1)*(y1-y0+1)), true
+	gray := image.NewGray(image.Rect(0, 0, b.Dx(), b.Dy()))
+	draw.Draw(gray, gray.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
+	draw.Draw(gray, gray.Bounds(), img, b.Min, draw.Over)
+	return gray
 }
 
-// dedupe drops candidates that overlap or nest inside a more confident one,
-// which is what a double-ruled border or a box-in-a-box produces.
+// blockSize is the adaptive threshold's neighbourhood: big enough to hold a
+// checkbox and some surrounding paper, and odd, as OpenCV requires.
+func blockSize(w, h int) int {
+	n := min(max(min(w, h)/25, 15), 101)
+	if n%2 == 0 {
+		n++
+	}
+	return n
+}
+
+// dedupe drops candidates that overlap or nest inside another, which is what a
+// box's outline and its own interior hole produce. The larger box wins, so a
+// hole never shadows the border around it.
 func dedupe(dets []detection) []detection {
 	sort.SliceStable(dets, func(i, j int) bool {
+		a, b := dets[i].Box, dets[j].Box
+		if an, bn := a.Width*a.Height, b.Width*b.Height; an != bn {
+			return an > bn
+		}
 		return dets[i].Confidence > dets[j].Confidence
 	})
 
@@ -215,14 +495,34 @@ func iou(a, b box) float64 {
 }
 
 // nests reports whether either box sits entirely within the other.
+// nests reports whether one of the boxes is the other's outline or interior
+// hole: the same box found twice, once from each side of its border.
+//
+// Containment alone is not enough to say that. A ruled response cell, or any
+// other box that clears the gates, encloses the checkboxes drawn inside it,
+// and since dedupe keeps the larger candidate, treating containment as a
+// duplicate would delete every real box in that cell. What distinguishes an
+// outline from a container is that the two are near-concentric: the gap
+// between them is the border stroke, on all four sides.
 func nests(a, b box) bool {
 	inside := func(inner, outer box) bool {
-		return inner.X >= outer.X && inner.Y >= outer.Y &&
-			inner.X+inner.Width <= outer.X+outer.Width &&
-			inner.Y+inner.Height <= outer.Y+outer.Height
+		left, top := inner.X-outer.X, inner.Y-outer.Y
+		right := outer.X + outer.Width - (inner.X + inner.Width)
+		bottom := outer.Y + outer.Height - (inner.Y + inner.Height)
+		if left < 0 || top < 0 || right < 0 || bottom < 0 {
+			return false
+		}
+		gapX := int(math.Round(nestGapFrac * float64(outer.Width)))
+		gapY := int(math.Round(nestGapFrac * float64(outer.Height)))
+		return left <= gapX && right <= gapX && top <= gapY && bottom <= gapY
 	}
 	return inside(a, b) || inside(b, a)
 }
+
+// nestGapFrac is how far the two can sit apart on any one side and still be
+// the same box seen twice. It matches maxStrokeFrac, the widest border the
+// interior measurement will account for.
+const nestGapFrac = maxStrokeFrac
 
 // sortReadingOrder sorts top to bottom, then left to right, grouping boxes
 // into rows so that a few pixels of vertical skew does not scramble a row.
@@ -234,7 +534,7 @@ func sortReadingOrder(dets []detection) {
 	for i, d := range dets {
 		heights[i] = d.Box.Height
 	}
-	slices.Sort(heights)
+	sort.Ints(heights)
 	rowHeight := max(1, heights[len(heights)/2])
 
 	row := func(d detection) int { return (d.Box.Y + d.Box.Height/2) / rowHeight }
@@ -244,167 +544,4 @@ func sortReadingOrder(dets []detection) {
 		}
 		return dets[i].Box.X < dets[j].Box.X
 	})
-}
-
-// bitmap is a binarized image: ink is true where a pixel is darker than the
-// threshold picked for the whole image.
-type bitmap struct {
-	w, h int
-	ink  []bool
-}
-
-// binarize converts img to a bitmap using Sauvola's local thresholding, which
-// compares each pixel to the mean and spread of its neighbourhood.
-//
-// A single global threshold (Otsu) is not good enough here: on a page where
-// ink covers well under 1% of the pixels, the threshold that best splits the
-// histogram is one that cuts the noisy paper distribution in half, which turns
-// half the page into "ink" and buries the checkboxes. Thresholding locally also
-// absorbs uneven lighting in photographed forms.
-func binarize(img image.Image) *bitmap {
-	b := img.Bounds()
-	if b.Dx() < 3 || b.Dy() < 3 {
-		return nil
-	}
-	w, h := b.Dx(), b.Dy()
-
-	gray := image.NewGray(image.Rect(0, 0, w, h))
-	// Fill white first and compose over it: a transparent PNG background would
-	// otherwise land on black and read as solid ink.
-	draw.Draw(gray, gray.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
-	draw.Draw(gray, gray.Bounds(), img, b.Min, draw.Over)
-
-	sum, sumSq := integrals(gray.Pix, w, h)
-	radius := windowRadius(w, h)
-
-	bm := &bitmap{w: w, h: h, ink: make([]bool, w*h)}
-	for y := range h {
-		y0, y1 := max(y-radius, 0), min(y+radius, h-1)
-		for x := range w {
-			x0, x1 := max(x-radius, 0), min(x+radius, w-1)
-			n := float64((x1 - x0 + 1) * (y1 - y0 + 1))
-
-			total := float64(rectSum(sum, w, x0, y0, x1, y1))
-			totalSq := float64(rectSum(sumSq, w, x0, y0, x1, y1))
-			mean := total / n
-			variance := totalSq/n - mean*mean
-			if variance < 0 {
-				variance = 0
-			}
-
-			// Sauvola: on flat paper the threshold sits at (1-k) of the local
-			// mean; where contrast is high it moves towards the mean.
-			t := mean * (1 + sauvolaK*(math.Sqrt(variance)/sauvolaRange-1))
-			bm.ink[y*w+x] = float64(gray.Pix[y*w+x]) <= t
-		}
-	}
-	return bm
-}
-
-const (
-	sauvolaK     = 0.2
-	sauvolaRange = 128.0
-)
-
-// windowRadius scales the neighbourhood with the image so that a window covers
-// a checkbox and some surrounding paper, but never the whole page.
-func windowRadius(w, h int) int {
-	r := min(w, h) / 40
-	return min(max(r, 7), 50)
-}
-
-// integrals builds summed-area tables of the pixel values and their squares,
-// which make the local mean and variance constant-time per pixel.
-func integrals(pix []uint8, w, h int) (sum, sumSq []int64) {
-	sum = make([]int64, (w+1)*(h+1))
-	sumSq = make([]int64, (w+1)*(h+1))
-	for y := range h {
-		var rowSum, rowSumSq int64
-		for x := range w {
-			v := int64(pix[y*w+x])
-			rowSum += v
-			rowSumSq += v * v
-			i := (y+1)*(w+1) + x + 1
-			sum[i] = sum[i-(w+1)] + rowSum
-			sumSq[i] = sumSq[i-(w+1)] + rowSumSq
-		}
-	}
-	return sum, sumSq
-}
-
-// rectSum returns the total over the inclusive rectangle from a summed-area
-// table built by integrals.
-func rectSum(table []int64, w, x0, y0, x1, y1 int) int64 {
-	stride := w + 1
-	a := table[y0*stride+x0]
-	b := table[y0*stride+x1+1]
-	c := table[(y1+1)*stride+x0]
-	d := table[(y1+1)*stride+x1+1]
-	return d - b - c + a
-}
-
-func (bm *bitmap) inkFrac() float64 {
-	n := 0
-	for _, v := range bm.ink {
-		if v {
-			n++
-		}
-	}
-	return float64(n) / float64(len(bm.ink))
-}
-
-// component is one connected run of ink, described by its bounding box.
-type component struct {
-	label                  int32
-	minX, minY, maxX, maxY int
-	pixels                 int
-}
-
-// components labels every connected run of ink using 8-connectivity, so a
-// border with single-pixel diagonal gaps still comes back as one shape.
-func (bm *bitmap) components() ([]int32, []component) {
-	labels := make([]int32, len(bm.ink))
-	var comps []component
-	stack := make([]int, 0, 1024)
-
-	var next int32
-	for start := range bm.ink {
-		if !bm.ink[start] || labels[start] != 0 {
-			continue
-		}
-		next++
-		c := component{
-			label: next,
-			minX:  start % bm.w, maxX: start % bm.w,
-			minY: start / bm.w, maxY: start / bm.w,
-		}
-
-		labels[start] = next
-		stack = append(stack, start)
-		for len(stack) > 0 {
-			idx := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			x, y := idx%bm.w, idx/bm.w
-
-			c.pixels++
-			c.minX, c.maxX = min(c.minX, x), max(c.maxX, x)
-			c.minY, c.maxY = min(c.minY, y), max(c.maxY, y)
-
-			for dy := -1; dy <= 1; dy++ {
-				for dx := -1; dx <= 1; dx++ {
-					nx, ny := x+dx, y+dy
-					if nx < 0 || ny < 0 || nx >= bm.w || ny >= bm.h {
-						continue
-					}
-					n := ny*bm.w + nx
-					if bm.ink[n] && labels[n] == 0 {
-						labels[n] = next
-						stack = append(stack, n)
-					}
-				}
-			}
-		}
-		comps = append(comps, c)
-	}
-	return labels, comps
 }

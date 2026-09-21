@@ -3,8 +3,12 @@ package main
 import (
 	"image"
 	"image/color"
+	"image/png"
 	"math"
 	"math/rand/v2"
+	"os"
+
+	"gocv.io/x/gocv"
 	"testing"
 )
 
@@ -93,7 +97,7 @@ func TestDetectReportsCheckedState(t *testing.T) {
 	drawBox(img, 160, 20, 24, 1) // ticked
 	drawTick(img, 160, 20, 24)
 
-	got := NewDetector().Detect(img)
+	got := mustDetect(t, NewDetector(), img)
 	if len(got) != 3 {
 		t.Fatalf("found %d checkboxes, want 3: %+v", len(got), got)
 	}
@@ -101,9 +105,6 @@ func TestDetectReportsCheckedState(t *testing.T) {
 	wantChecked := []bool{false, true, true}
 	wantX := []int{20, 90, 160}
 	for i, d := range got {
-		if d.Label != "checkbox" {
-			t.Errorf("[%d] label = %q, want checkbox", i, d.Label)
-		}
 		if d.Checked != wantChecked[i] {
 			t.Errorf("[%d] checked = %v, want %v (box %+v)", i, d.Checked, wantChecked[i], d.Box)
 		}
@@ -122,7 +123,7 @@ func TestDetectHandlesMarkTouchingBorder(t *testing.T) {
 	line(img, 20, 20, 49, 49, 2)
 	line(img, 49, 20, 20, 49, 2)
 
-	got := NewDetector().Detect(img)
+	got := mustDetect(t, NewDetector(), img)
 	if len(got) != 1 {
 		t.Fatalf("found %d checkboxes, want 1: %+v", len(got), got)
 	}
@@ -135,7 +136,7 @@ func TestDetectThickBorderAndLargeBox(t *testing.T) {
 	img := blankForm(200, 200)
 	drawBox(img, 40, 40, 90, 4)
 
-	got := NewDetector().Detect(img)
+	got := mustDetect(t, NewDetector(), img)
 	if len(got) != 1 {
 		t.Fatalf("found %d checkboxes, want 1: %+v", len(got), got)
 	}
@@ -143,6 +144,73 @@ func TestDetectThickBorderAndLargeBox(t *testing.T) {
 		t.Error("checked = true, want false")
 	}
 	wantBox(t, got[0].Box, 40, 40, 90, 90)
+}
+
+// mustDetect runs the detector and fails the test if it could not examine
+// the image, so that a broken detector never reads as an empty page.
+func mustDetect(tb testing.TB, d *Detector, img image.Image) []detection {
+	tb.Helper()
+	got, err := d.Detect(img)
+	if err != nil {
+		tb.Fatalf("Detect: %v", err)
+	}
+	return got
+}
+
+// blur softens an image with a 3x3 box filter, so a drawn box picks up the
+// grey fringe a scan would give it.
+func blur(img *image.Gray) *image.Gray {
+	out := image.NewGray(img.Bounds())
+	b := img.Bounds()
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			sum, n := 0, 0
+			for dy := -1; dy <= 1; dy++ {
+				for dx := -1; dx <= 1; dx++ {
+					if p := (image.Point{X: x + dx, Y: y + dy}); p.In(b) {
+						sum += int(img.GrayAt(p.X, p.Y).Y)
+						n++
+					}
+				}
+			}
+			out.SetGray(x, y, color.Gray{Y: uint8(sum / n)})
+		}
+	}
+	return out
+}
+
+// A small box's border is a large fraction of its side, so a measurement
+// window inset by a fixed fraction still contains the stroke and reads the
+// border as if it were a mark.
+func TestDetectSmallBoxWithThickBorderIsNotChecked(t *testing.T) {
+	for _, side := range []int{14, 16, 20} {
+		img := blankForm(60, 60)
+		drawBox(img, 20, 20, side, 3)
+
+		got := mustDetect(t, NewDetector(), blur(img))
+		if len(got) != 1 {
+			t.Fatalf("side %d: found %d checkboxes, want 1: %+v", side, len(got), got)
+		}
+		if got[0].Checked {
+			t.Errorf("side %d: checked = true, want false", side)
+		}
+	}
+}
+
+// The same small thick-bordered box still has to register a mark.
+func TestDetectSmallBoxWithThickBorderSeesMark(t *testing.T) {
+	img := blankForm(60, 60)
+	drawBox(img, 20, 20, 16, 3)
+	line(img, 23, 23, 32, 32, 2)
+	line(img, 32, 23, 23, 32, 2)
+
+	got := mustDetect(t, NewDetector(), blur(img))
+	if len(got) != 1 {
+		t.Fatalf("found %d checkboxes, want 1: %+v", len(got), got)
+	}
+	if !got[0].Checked {
+		t.Error("checked = false, want true")
+	}
 }
 
 func TestDetectIgnoresNonCheckboxes(t *testing.T) {
@@ -175,7 +243,7 @@ func TestDetectIgnoresNonCheckboxes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			img := blankForm(90, 90)
 			tc.draw(img)
-			if got := NewDetector().Detect(img); len(got) != 0 {
+			if got := mustDetect(t, NewDetector(), img); len(got) != 0 {
 				t.Errorf("found %d checkboxes, want 0: %+v", len(got), got)
 			}
 		})
@@ -188,9 +256,52 @@ func TestDetectDedupesNestedBoxes(t *testing.T) {
 	drawBox(img, 20, 20, 40, 1)
 	drawBox(img, 24, 24, 32, 1)
 
-	got := NewDetector().Detect(img)
+	got := mustDetect(t, NewDetector(), img)
 	if len(got) != 1 {
 		t.Fatalf("found %d checkboxes, want 1: %+v", len(got), got)
+	}
+}
+
+// A checkbox scanned at a high DPI is a physically normal checkbox, so the
+// size cap has to grow with the image rather than throw the page away.
+func TestDetectFindsLargeBoxOnHighResolutionPage(t *testing.T) {
+	const side = 133 // over MaxSide, under the cap this page's size allows
+	img := blankForm(2400, 3000)
+	drawBox(img, 300, 400, side, 3)
+
+	got := mustDetect(t, NewDetector(), img)
+	if len(got) != 1 {
+		t.Fatalf("found %d checkboxes, want 1: %+v", len(got), got)
+	}
+	wantBox(t, got[0].Box, 300, 400, side, side)
+}
+
+// Containment is not duplication: a ruled cell encloses the checkboxes drawn
+// in it, and dedupe keeps the larger candidate, so treating every enclosed
+// box as a duplicate would delete the real answers.
+func TestDetectKeepsBoxesInsideARuledCell(t *testing.T) {
+	img := blankForm(200, 200)
+	drawBox(img, 40, 40, 100, 2) // the cell
+	drawBox(img, 55, 55, 20, 2)
+	drawBox(img, 55, 95, 20, 2)
+	line(img, 58, 98, 71, 111, 2) // mark the second one
+
+	var inner []detection
+	for _, d := range mustDetect(t, NewDetector(), img) {
+		if d.Box.Width < 40 {
+			inner = append(inner, d)
+		}
+	}
+	if len(inner) != 2 {
+		t.Fatalf("found %d boxes inside the cell, want 2: %+v", len(inner), inner)
+	}
+	wantBox(t, inner[0].Box, 55, 55, 20, 20)
+	wantBox(t, inner[1].Box, 55, 95, 20, 20)
+	if inner[0].Checked {
+		t.Error("first box checked = true, want false")
+	}
+	if !inner[1].Checked {
+		t.Error("second box checked = false, want true")
 	}
 }
 
@@ -202,7 +313,7 @@ func TestDetectSortsInReadingOrder(t *testing.T) {
 	drawBox(img, 120, 28, 24, 1)
 	drawBox(img, 28, 120, 24, 1)
 
-	got := NewDetector().Detect(img)
+	got := mustDetect(t, NewDetector(), img)
 	if len(got) != 4 {
 		t.Fatalf("found %d checkboxes, want 4: %+v", len(got), got)
 	}
@@ -231,7 +342,7 @@ func TestDetectToleratesNoiseAndGreyLevels(t *testing.T) {
 		}
 	}
 
-	got := NewDetector().Detect(img)
+	got := mustDetect(t, NewDetector(), img)
 	if len(got) != 2 {
 		t.Fatalf("found %d checkboxes, want 2: %+v", len(got), got)
 	}
@@ -252,7 +363,7 @@ func TestDetectHandlesTransparentBackground(t *testing.T) {
 		}
 	}
 
-	got := NewDetector().Detect(img)
+	got := mustDetect(t, NewDetector(), img)
 	if len(got) != 1 {
 		t.Fatalf("found %d checkboxes, want 1: %+v", len(got), got)
 	}
@@ -266,19 +377,19 @@ func TestDetectHandlesTransparentBackground(t *testing.T) {
 func TestDetectSkipsMostlyInkImages(t *testing.T) {
 	img := blankForm(80, 80)
 	fillRect(img, 0, 0, 80, 70)
-	if got := NewDetector().Detect(img); len(got) != 0 {
+	if got := mustDetect(t, NewDetector(), img); len(got) != 0 {
 		t.Errorf("found %d checkboxes, want 0: %+v", len(got), got)
 	}
 }
 
 func TestDetectReturnsEmptySliceNotNil(t *testing.T) {
-	if got := NewDetector().Detect(blankForm(40, 40)); got == nil {
+	if got := mustDetect(t, NewDetector(), blankForm(40, 40)); got == nil {
 		t.Error("Detect returned nil, want an empty slice")
 	}
 }
 
 func TestDetectHandlesTinyImage(t *testing.T) {
-	if got := NewDetector().Detect(blankForm(2, 2)); len(got) != 0 {
+	if got := mustDetect(t, NewDetector(), blankForm(2, 2)); len(got) != 0 {
 		t.Errorf("found %d checkboxes, want 0", len(got))
 	}
 }
@@ -310,7 +421,7 @@ func TestDetectFindsSparseBoxesOnNoisyPage(t *testing.T) {
 		}
 	}
 
-	got := NewDetector().Detect(img)
+	got := mustDetect(t, NewDetector(), img)
 	if len(got) != 16 {
 		t.Fatalf("found %d checkboxes, want 16", len(got))
 	}
@@ -344,7 +455,7 @@ func TestDetectHandlesUnevenLighting(t *testing.T) {
 		}
 	}
 
-	got := NewDetector().Detect(img)
+	got := mustDetect(t, NewDetector(), img)
 	if len(got) != 3 {
 		t.Fatalf("found %d checkboxes, want 3: %+v", len(got), got)
 	}
@@ -354,7 +465,7 @@ func TestDetectHandlesUnevenLighting(t *testing.T) {
 	}
 }
 
-func TestSauvolaSeparatesInkFromNoisyPaper(t *testing.T) {
+func TestBinarizeSeparatesInkFromNoisyPaper(t *testing.T) {
 	rng := rand.New(rand.NewPCG(5, 6))
 	img := blankForm(200, 200)
 	for i := range img.Pix {
@@ -362,15 +473,47 @@ func TestSauvolaSeparatesInkFromNoisyPaper(t *testing.T) {
 	}
 	fillRect(img, 100, 100, 4, 4)
 
-	bm := binarize(img)
-	if bm == nil {
-		t.Fatal("binarize returned nil")
+	src, err := gocv.ImageGrayToMatGray(img)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if frac := bm.inkFrac(); frac > 0.01 {
+	defer src.Close()
+
+	ink, err := NewDetector().binarize(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ink.Close()
+
+	if frac := inkFraction(ink); frac > 0.01 {
 		t.Errorf("ink fraction = %.3f, want the paper noise excluded", frac)
 	}
-	if !bm.ink[102*200+102] {
+	if ink.GetUCharAt(102, 102) == 0 {
 		t.Error("the drawn mark was not detected as ink")
+	}
+}
+
+// A solid mark must stay solid: adaptive thresholding on its own hollows out
+// the middle of a large dark area, which would turn a filled blob into a ring
+// and then into a bogus empty checkbox.
+func TestBinarizeKeepsSolidAreasSolid(t *testing.T) {
+	img := blankForm(120, 120)
+	fillRect(img, 30, 30, 50, 50)
+
+	src, err := gocv.ImageGrayToMatGray(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+
+	ink, err := NewDetector().binarize(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ink.Close()
+
+	if ink.GetUCharAt(55, 55) == 0 {
+		t.Error("the middle of the filled square is not ink")
 	}
 }
 
@@ -404,8 +547,35 @@ func BenchmarkDetect(b *testing.B) {
 		b.Run(s.name, func(b *testing.B) {
 			d := NewDetector()
 			for b.Loop() {
-				d.Detect(img)
+				mustDetect(b, d, img)
 			}
 		})
+	}
+}
+
+// The committed form image is the case that exposed the threshold being too
+// tight: its cross marks are thin, and measuring everything inside the border
+// put them at 0.135 ink against a 0.15 cutoff, so both read as unchecked.
+func TestDetectMarksThinCrossesAsChecked(t *testing.T) {
+	f, err := os.Open("testdata/form.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	img, err := png.Decode(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := mustDetect(t, NewDetector(), img)
+	if len(got) != 4 {
+		t.Fatalf("found %d checkboxes, want 4: %+v", len(got), got)
+	}
+
+	want := []bool{false, true, true, false}
+	for i, d := range got {
+		if d.Checked != want[i] {
+			t.Errorf("[%d] at x=%d checked = %v, want %v", i, d.Box.X, d.Checked, want[i])
+		}
 	}
 }

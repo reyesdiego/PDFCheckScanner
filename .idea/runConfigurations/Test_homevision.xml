@@ -2,8 +2,15 @@
   <configuration default="false" name="Test homevision" type="GoTestRunConfiguration" factoryName="Go Test">
     <module name="homevision" />
     <working_directory value="$PROJECT_DIR$" />
-    <kind value="PACKAGE" />
-    <package value="homevision" />
+    <envs>
+      <!-- pdftoppm lives in Homebrew's bin, which GoLand does not inherit when
+           launched from the Dock rather than a shell. -->
+      <env name="PATH" value="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" />
+      <!-- gocv links against OpenCV through cgo, and opencv@4 is keg-only, so
+           pkg-config has to be pointed at it explicitly. -->
+      <env name="PKG_CONFIG_PATH" value="/opt/homebrew/opt/opencv@4/lib/pkgconfig" />
+    </envs>
+    <kind value="DIRECTORY" />
     <directory value="$PROJECT_DIR$" />
     <framework value="gotest" />
     <method v="2" />

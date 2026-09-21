@@ -9,8 +9,45 @@ changing what they should contain:
 | --- | --- |
 | `form-fields.pdf` | AcroForm checkboxes on three pages (page 3 is `/Rotate 90`), one of them a widget nested under a parent field so its qualified name is `consent.marketing`, plus a radio group, a push button and a text field that must all be ignored. Exercises the fast path. |
 | `scanned-form.pdf` | One flattened grayscale page, 8 checkboxes, 3 marked. No form fields, so it exercises the pdftoppm fallback. |
-| `form.png` | A small form image, 4 checkboxes with the middle two marked. Used by `api.http`. |
+| `form.png` | A small form image, 4 checkboxes with the middle two marked. Used by `api.http` and by the thin-mark test. No text: see the note below. |
+| `prose.pdf` | Real Helvetica text, a bold heading, and not one checkbox. The false-positive canary. |
+| `mixed.pdf` | The same text plus 6 checkboxes, 3 of them marked, so precision and recall are exercised together. |
 | `scanned-broken-fields.pdf` | The same page with a form field pdfcpu rejects as invalid. Exercises falling through from a failed field read to the rasterizer. |
+
+## The uncommitted samples
+
+`hm1.png` ... `hm11.png` are crops of the sample appraisal documents that came
+with the challenge, and `homevision.pdf` is the challenge description itself.
+They are someone else's paperwork, so they are not committed here.
+
+The tests that read them are behind the `samples` build tag:
+
+    make samples          # go test -tags samples ./...
+
+Without the tag they are not compiled, and with it a missing file is a
+failure. They used to skip when absent, which meant that on any machine but
+the author's the suite went green having exercised none of the real-document
+behaviour. Most of those cases are regression floors taken from measured
+behaviour rather than hand-labelled ground truth, so they catch a collapse in
+recall, not every individual mistake.
+
+## Why the text fixtures are PDFs
+
+Everything drawn by hand here is a rectangle on blank paper, and for a long
+while that was all the fixtures contained. The suite passed while the detector
+was reporting 167 checkboxes on a page of prose, because nothing in `testdata`
+had any text in it.
+
+Drawing convincing glyphs by hand does not work: what breaks a geometric
+checkbox detector is specifically letters with straight stems and
+near-rectangular counters - `B`, `D`, `O`, `0`, `8` - and crude approximations
+of those do not reproduce the failure. Rasterizing real type does, and a PDF
+gets it for free: the content stream names Helvetica, and `pdftoppm` renders
+genuine anti-aliased glyphs at whatever resolution the detector asks for. No
+font file, no font rasterizer, no extra dependency.
+
+That is also why `form.png` has no text on it. There is no image library here
+that can draw type into a bitmap, so the text fixtures take the PDF route.
 
 `lossless.webp` (VP8L) and `lossy.webp` (VP8) are copied from the
 golang.org/x/image test suite (`testdata/gopher-doc.1bpp.lossless.webp` and

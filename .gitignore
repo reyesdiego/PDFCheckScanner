@@ -1,2 +1,13 @@
 /bin/
 /homevision
+.DS_Store
+
+# GoLand project files: the run configurations are shared deliberately, the
+# rest is per-machine state.
+/.idea/*
+!/.idea/runConfigurations/
+
+# Sample appraisal documents that came with the challenge: someone else's
+# paperwork, read only by the `samples`-tagged tests. See testdata/README.md.
+/testdata/hm*.png
+/testdata/homevision.pdf
