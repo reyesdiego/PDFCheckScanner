@@ -157,6 +157,22 @@ func mustDetect(tb testing.TB, d *Detector, img image.Image) []detection {
 	return got
 }
 
+// loadPNG reads a committed PNG fixture.
+func loadPNG(tb testing.TB, path string) image.Image {
+	tb.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	defer f.Close()
+
+	img, err := png.Decode(f)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return img
+}
+
 // blur softens an image with a 3x3 box filter, so a drawn box picks up the
 // grey fringe a scan would give it.
 func blur(img *image.Gray) *image.Gray {
@@ -177,6 +193,58 @@ func blur(img *image.Gray) *image.Gray {
 		}
 	}
 	return out
+}
+
+// strokeWidth has to find the border even when the candidate's rectangle
+// does not sit exactly on it, because a softly binarized contour lands a
+// pixel or two outside. The budget it scans with counts stroke, not steps:
+// charging the skipped background against it left a 3px border on a 16px box
+// measuring 2, which is enough to leave a row of border inside the interior
+// window and read an empty box as marked.
+func TestStrokeWidth(t *testing.T) {
+	// An ink mask, drawn by hand so the border is exactly where it says.
+	const w, h, stroke = 60, 60, 3
+	pix := make([]byte, w*h)
+	drawInkBox := func(x, y, side int) {
+		for t := range stroke {
+			for i := range side {
+				pix[(y+t)*w+x+i] = 255
+				pix[(y+side-1-t)*w+x+i] = 255
+				pix[(y+i)*w+x+t] = 255
+				pix[(y+i)*w+x+side-1-t] = 255
+			}
+		}
+	}
+	drawInkBox(4, 4, 12) // small enough that the scan budget bites
+	drawInkBox(30, 30, 20)
+
+	mask, err := gocv.NewMatFromBytes(h, w, gocv.MatTypeCV8U, pix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mask.Close()
+
+	small := image.Rect(4, 4, 16, 16)
+	large := image.Rect(30, 30, 50, 50)
+	for _, c := range []struct {
+		name string
+		r    image.Rectangle
+		want int
+	}{
+		{"on the border", small, stroke},
+		{"a pixel outside", small.Inset(-1), stroke},
+		// The case the budget used to get wrong: two pixels of lead plus a
+		// 3px border is five steps, and a 20px rect allows only five, so any
+		// smaller box came up short.
+		{"two pixels outside", small.Inset(-2), stroke},
+		{"further out than a contour ever lands", small.Inset(-4), 0},
+		{"a larger box", large, stroke},
+		{"nowhere near ink", image.Rect(22, 4, 30, 12), 0},
+	} {
+		if got := strokeWidth(mask, c.r); got != c.want {
+			t.Errorf("%s: strokeWidth = %d, want %d", c.name, got, c.want)
+		}
+	}
 }
 
 // A small box's border is a large fraction of its side, so a measurement
@@ -556,18 +624,175 @@ func BenchmarkDetect(b *testing.B) {
 // The committed form image is the case that exposed the threshold being too
 // tight: its cross marks are thin, and measuring everything inside the border
 // put them at 0.135 ink against a 0.15 cutoff, so both read as unchecked.
-func TestDetectMarksThinCrossesAsChecked(t *testing.T) {
-	f, err := os.Open("testdata/form.png")
-	if err != nil {
-		t.Fatal(err)
+// A ruled table cell is a rectangle with a complete border and a clean
+// interior: by shape there is nothing to tell it from a checkbox. What gives
+// it away is that it is the width of its column rather than the width of a
+// checkbox, and a printed form draws every checkbox the same size. image2 has
+// a narrow column beside each checkbox and reported all 13 of its cells.
+//
+// All 13 of this page's cells are narrower than its boxes, which is the side
+// of the median the prior is strict about, so the page comes out exactly
+// right. image4's cells are on the other side and four of them survive.
+func TestDetectDropsCellsOfTheWrongSize(t *testing.T) {
+	got := mustDetect(t, NewDetector(), loadPNG(t, "testdata/image2.png"))
+
+	if len(got) != 48 {
+		t.Errorf("found %d checkboxes, want 48", len(got))
 	}
-	defer f.Close()
-	img, err := png.Decode(f)
-	if err != nil {
-		t.Fatal(err)
+	checked := 0
+	for _, d := range got {
+		if d.Checked {
+			checked++
+		}
+		if d.Box.Width < 20 {
+			t.Errorf("reported a %dx%d box at (%d,%d); the ruled cells are 17-19px",
+				d.Box.Width, d.Box.Height, d.Box.X, d.Box.Y)
+		}
+	}
+	if checked != 12 {
+		t.Errorf("found %d marked checkboxes, want 12", checked)
+	}
+}
+
+// The prior needs enough boxes to be evidence, it judges each dimension
+// against the page's own median, and it is stricter about a box being too
+// small than too large.
+func TestDropOffSizeBoxes(t *testing.T) {
+	const under, over = 0.15, 0.25
+	page := func(n int, w, h int) []detection {
+		out := make([]detection, n)
+		for i := range out {
+			out[i] = detection{Box: box{X: i * 50, Width: w, Height: h}}
+		}
+		return out
+	}
+	with := func(n int, b box) []detection {
+		return append(page(n, 20, 20), detection{Box: b})
 	}
 
-	got := mustDetect(t, NewDetector(), img)
+	for _, c := range []struct {
+		name string
+		dets []detection
+		want int
+	}{
+		{"far too wide", with(12, box{Width: 40, Height: 20}), 12},
+		{"a shade too narrow", with(12, box{Width: 16, Height: 20}), 12},
+		{"too short", with(12, box{Width: 20, Height: 16}), 12},
+		{"oversized within tolerance", with(12, box{Width: 24, Height: 24}), 13},
+		{"undersized within tolerance", with(12, box{Width: 18, Height: 18}), 13},
+		// Too few boxes to establish a median: nothing is dropped.
+		{"sparse page", with(4, box{Width: 40, Height: 20}), 5},
+	} {
+		if got := dropOffSizeBoxes(c.dets, under, over); len(got) != c.want {
+			t.Errorf("%s: kept %d of %d boxes, want %d", c.name, len(got), len(c.dets), c.want)
+		}
+	}
+}
+
+// An appraisal form labels its sections with a word set vertically down the
+// margin, white letters knocked out of a solid black band. Their counters are
+// neat little rectangles on a field of ink, and the detector read ten of them
+// on image4 and two on image3 as checkboxes - all of them "checked", since
+// the band around them is ink.
+//
+// This does not fix every false positive on the page: nine ruled table cells
+// holding a word, 32-39px wide against the page's 25-27px boxes, still get
+// through. Squareness cannot separate those - this scan's real boxes measure
+// 0.77-0.85 and the cells 0.61-0.75, and the two ranges touch.
+func TestDetectIgnoresLetteringInSolidBanners(t *testing.T) {
+	got := mustDetect(t, NewDetector(), loadPNG(t, "testdata/image4.png"))
+
+	// The band runs down the left edge and is about 36px wide. Nothing on
+	// this form sits wholly inside it - the leftmost real checkbox starts at
+	// x=39 and runs to x=68.
+	for _, d := range got {
+		if d.Box.X+d.Box.Width <= 36 {
+			t.Errorf("reported a checkbox at (%d,%d) %dx%d, inside the section banner",
+				d.Box.X, d.Box.Y, d.Box.Width, d.Box.Height)
+		}
+	}
+	// And the guard must not have worked by rejecting the page.
+	if len(got) < 110 {
+		t.Errorf("found %d checkboxes, want at least 110", len(got))
+	}
+}
+
+// The margin has to follow the page: large enough to ignore grain on a noisy
+// scan, small enough to see a grey border on a clean one. Neither value works
+// for the other page, which is why it is measured rather than fixed.
+func TestThresholdCFollowsImageNoise(t *testing.T) {
+	d := NewDetector()
+
+	quiet := blur(blankForm(200, 200))
+	rng := rand.New(rand.NewPCG(11, 12))
+	grainy := blankForm(200, 200)
+	for i := range grainy.Pix {
+		grainy.Pix[i] = uint8(200 + rng.IntN(56))
+	}
+
+	for _, c := range []struct {
+		name string
+		img  *image.Gray
+		want float32
+	}{
+		{"quiet", quiet, minThresholdC},
+		{"grainy", grainy, d.ThresholdC},
+	} {
+		src, err := gocv.ImageGrayToMatGray(c.img)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := d.thresholdC(src)
+		src.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != c.want {
+			t.Errorf("%s page: margin = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// image1 is a form scanned at about 150 DPI, where a checkbox is 16-17px.
+// At that size the polygon tolerance fell below the precision of the image
+// itself: 0.02 of a 64px perimeter is 1.3px, and a rasterized edge wanders
+// about a pixel either way, so every anti-aliased corner became an extra
+// vertex. Perfect squares came back as pentagons and were thrown out for not
+// being quadrilaterals - 20 of this page's boxes, a third of them.
+//
+// The page is also the clearest example of the table-rule limitation: its
+// marked boxes are fused to the form's grid, so their enclosing contour is
+// the whole 1081x1648 table and the X breaks up the interior hole that would
+// otherwise find them. That is why so few of these read as checked, and it
+// is why this test does not assert a count of them.
+func TestDetectFindsSmallBoxesRejectedAsPentagons(t *testing.T) {
+	got := mustDetect(t, NewDetector(), loadPNG(t, "testdata/image1.png"))
+	if len(got) < 55 {
+		t.Errorf("found %d checkboxes, want at least 55", len(got))
+	}
+
+	// Two of the boxes that were lost. Both measured squareness 1.00,
+	// rectangularity 0.87 and edge coverage 1.00 - every gate that describes
+	// a checkbox said yes, and only the corner count said no.
+	for _, want := range []box{
+		{X: 814, Y: 169, Width: 16, Height: 16},
+		{X: 711, Y: 169, Width: 17, Height: 16},
+	} {
+		found := false
+		for _, d := range got {
+			if iou(d.Box, want) > 0.5 {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("no checkbox at %+v", want)
+		}
+	}
+}
+
+func TestDetectMarksThinCrossesAsChecked(t *testing.T) {
+	got := mustDetect(t, NewDetector(), loadPNG(t, "testdata/form.png"))
 	if len(got) != 4 {
 		t.Fatalf("found %d checkboxes, want 4: %+v", len(got), got)
 	}

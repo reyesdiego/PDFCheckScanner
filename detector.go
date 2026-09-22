@@ -55,6 +55,19 @@ type Detector struct {
 	// MinRectangularity is how much of its bounding box the candidate's convex
 	// hull must enclose. A rectangle scores 1; a triangle or a curve far less.
 	MinRectangularity float64
+	// ExtraCornerRectangularity is the bar a five-cornered hull has to clear
+	// to be treated as a quadrilateral anyway.
+	//
+	// Insisting on exactly four corners is brittle. A soft scan rounds one
+	// corner of a box more than the others and the fit puts a fifth vertex
+	// there: seven of the boxes on image6 came back as pentagons while
+	// measuring 0.97-1.00 squareness, 0.90-0.92 rectangularity and 1.00 edge
+	// coverage. Loosening the fit tolerance instead lets the counters of bold
+	// letters through - at a 3px floor a page of prose starts reporting
+	// checkboxes again - so the corner count stays tight and the shape
+	// measures are what excuse the extra corner. A curve cannot: it is the
+	// rectangularity that a "D" fails.
+	ExtraCornerRectangularity float64
 	// MinEdgeCoverage is the fraction of each side of the bounding box that
 	// must carry ink near it. A hull is blind to what is missing from the
 	// middle of a side, and blocky capitals like H, E and N have rectangular
@@ -66,6 +79,13 @@ type Detector struct {
 	// while at 0.02 the prose pages of a document come back empty and the forms
 	// keep all but a handful of their boxes.
 	ApproxEpsilonFrac float64
+	// MinApproxEpsilon is a floor, in pixels, under which ApproxEpsilonFrac
+	// is not allowed to fall. A rasterized straight edge wanders about a
+	// pixel either way, so a tolerance finer than that is fitting the
+	// anti-aliasing: on a 16px box the fraction alone works out at 1.3px and
+	// each rounded corner becomes an extra vertex, so a perfect square comes
+	// back as a pentagon and is thrown out for not being a quadrilateral.
+	MinApproxEpsilon float64
 	// MaxInteriorInk rejects candidates whose interior is essentially solid,
 	// which is a blob or a glyph rather than a box with a mark in it.
 	MaxInteriorInk float64
@@ -84,13 +104,26 @@ type Detector struct {
 	// clears them all comfortably, so the blended score separates the two
 	// where no single threshold can.
 	MinConfidence float64
-	// ThresholdC is how much darker than its neighbourhood a pixel must be to
-	// count as ink. Paper grain needs a generous margin: at a small value a
-	// third of a noisy scan's background crosses its local mean and the page
-	// binarizes to mush. Blurring the input first would fix that too, but it
-	// widens every stroke and inflates the reported boxes by a pixel on each
-	// side, so the margin does the work instead.
+	// ThresholdC is the most a pixel has to be darker than its neighbourhood
+	// to count as ink. Paper grain needs a generous margin: at a small value
+	// a third of a noisy scan's background crosses its local mean and the
+	// page binarizes to mush. Blurring the input first would fix that too,
+	// but it widens every stroke and inflates the reported boxes by a pixel
+	// on each side, so the margin does the work instead.
+	//
+	// It is a ceiling rather than a fixed value because the margin only has
+	// to cover the noise that is actually there. A soft, low-contrast scan
+	// has almost none, and on one the fixed 30 was more than the contrast
+	// between a grey box border and the paper around it: the border came out
+	// dashed, edge coverage fell to 0.21, and a row of nine checkboxes
+	// reported none at all.
 	ThresholdC float32
+	// ThresholdCPerSigma sets the margin as a multiple of the estimated
+	// noise, bounded by minThresholdC and ThresholdC. The samples separate
+	// cleanly: a soft scan measures about 4 grey levels of noise and the
+	// grainy ones 10-18, so at 2.5 the grainy pages keep the full margin they
+	// need and the soft ones get one they can clear.
+	ThresholdCPerSigma float64
 	// MaxInkFrac skips images that are mostly ink, where "dark on light" does
 	// not hold and the binarization would be meaningless.
 	MaxInkFrac float64
@@ -98,6 +131,11 @@ type Detector struct {
 	// neighbourhood looks like. Adaptive thresholding alone hollows out large
 	// solid areas, because the middle of a blob has no local contrast.
 	DarkFloor float32
+	// UndersizeFrac is how far below the median of the page's own boxes a
+	// box may measure; OversizeFrac is how far above. See dropOffSizeBoxes
+	// for why the two differ.
+	UndersizeFrac float64
+	OversizeFrac  float64
 	// MaxDetections caps how many checkboxes a single image can report.
 	MaxDetections int
 }
@@ -105,22 +143,27 @@ type Detector struct {
 // NewDetector returns a Detector tuned for checkboxes on scanned forms.
 func NewDetector() *Detector {
 	return &Detector{
-		MinSide:              12,
-		MaxSide:              120,
-		MaxSideShortEdgeFrac: 0.06,
-		MaxSideFrac:          0.9,
-		MinSquareness:        0.6,
-		MinRectangularity:    0.8,
-		MinEdgeCoverage:      0.75,
-		ApproxEpsilonFrac:    0.02,
-		MaxInteriorInk:       0.85,
-		CheckedInk:           0.10,
-		CheckedWideInk:       0.13,
-		MinConfidence:        0.87,
-		ThresholdC:           30,
-		MaxInkFrac:           0.6,
-		DarkFloor:            90,
-		MaxDetections:        500,
+		MinSide:                   12,
+		MaxSide:                   120,
+		MaxSideShortEdgeFrac:      0.06,
+		MaxSideFrac:               0.9,
+		MinSquareness:             0.6,
+		MinRectangularity:         0.8,
+		ExtraCornerRectangularity: 0.9,
+		MinEdgeCoverage:           0.75,
+		ApproxEpsilonFrac:         0.02,
+		MinApproxEpsilon:          2,
+		MaxInteriorInk:            0.85,
+		CheckedInk:                0.10,
+		CheckedWideInk:            0.13,
+		MinConfidence:             0.87,
+		ThresholdC:                30,
+		ThresholdCPerSigma:        2.5,
+		MaxInkFrac:                0.6,
+		DarkFloor:                 90,
+		UndersizeFrac:             0.15,
+		OversizeFrac:              0.25,
+		MaxDetections:             500,
 	}
 }
 
@@ -155,18 +198,48 @@ func (d *Detector) Detect(img image.Image) ([]detection, error) {
 	}
 	defer src.Close()
 
-	ink, err := d.binarize(src)
+	// Two masks, because the margin that finds a shape is not the margin
+	// that should judge what is inside it. A soft, low-contrast scan needs a
+	// small margin or its box borders come out dashed; but a small margin
+	// also turns the blurred fringe of a border into ink, and on a box near
+	// MinSide that fringe fills the interior and the box reads as marked. So
+	// shapes come from the margin the page's noise calls for, and the ink
+	// inside them is always read at the full margin. On a grainy page the two
+	// are the same mask and nothing changes.
+	// Measuring the page's noise means blurring and reducing the whole of it,
+	// so the margin is worked out once and both masks are built from it.
+	c, err := d.thresholdC(src)
+	if err != nil {
+		return nil, fmt.Errorf("measure image: %w", err)
+	}
+
+	shape, err := d.binarizeAt(src, c)
 	if err != nil {
 		return nil, fmt.Errorf("binarize image: %w", err)
 	}
-	defer ink.Close()
+	defer shape.Close()
 
-	if inkFraction(ink) > d.MaxInkFrac {
+	if inkFraction(shape) > d.MaxInkFrac {
 		return []detection{}, nil
 	}
 
-	found := d.candidates(ink)
+	ink := shape
+	if c < d.ThresholdC {
+		strict, err := d.binarizeAt(src, d.ThresholdC)
+		if err != nil {
+			return nil, fmt.Errorf("binarize image: %w", err)
+		}
+		defer strict.Close()
+		ink = strict
+	}
+
+	global := gocv.NewMat()
+	defer global.Close()
+	gocv.Threshold(src, &global, 0, 255, gocv.ThresholdBinaryInv|gocv.ThresholdOtsu)
+
+	found := d.candidates(masks{shape: shape, ink: ink, global: global})
 	found = dedupe(found)
+	found = dropOffSizeBoxes(found, d.UndersizeFrac, d.OversizeFrac)
 	if len(found) > d.MaxDetections {
 		// dedupe leaves the list ordered by area, and a big candidate is the
 		// least likely to be a real checkbox, so capping it as it stands
@@ -188,10 +261,19 @@ func (d *Detector) Detect(img image.Image) ([]detection, error) {
 // not need tuning per image, with an absolute floor OR-ed in so that large
 // solid marks stay solid instead of hollowing out.
 func (d *Detector) binarize(src gocv.Mat) (gocv.Mat, error) {
+	c, err := d.thresholdC(src)
+	if err != nil {
+		return gocv.Mat{}, err
+	}
+	return d.binarizeAt(src, c)
+}
+
+// binarizeAt binarizes with a given margin.
+func (d *Detector) binarizeAt(src gocv.Mat, c float32) (gocv.Mat, error) {
 	adaptive := gocv.NewMat()
 	defer adaptive.Close()
 	if err := gocv.AdaptiveThreshold(src, &adaptive, 255, gocv.AdaptiveThresholdGaussian,
-		gocv.ThresholdBinaryInv, blockSize(src.Cols(), src.Rows()), d.ThresholdC); err != nil {
+		gocv.ThresholdBinaryInv, blockSize(src.Cols(), src.Rows()), c); err != nil {
 		return gocv.Mat{}, err
 	}
 
@@ -208,19 +290,82 @@ func (d *Detector) binarize(src gocv.Mat) (gocv.Mat, error) {
 	return ink, nil
 }
 
-// candidates fits a polygon to every contour and keeps the ones shaped like a
-// checkbox.
-func (d *Detector) candidates(ink gocv.Mat) []detection {
+// masks are the views of the page that the gates read.
+//
+// Three, because no single binarization answers every question. Local
+// thresholding is what makes uneven lighting survivable, but it judges a
+// pixel against its neighbours, so heavy ink nearby costs a thin line its
+// contrast: a checkbox with an X in it comes out with its border half eaten,
+// scoring 0.59 edge coverage where the empty box beside it scores 0.97. A
+// global threshold has the opposite problem and the opposite virtue - blind
+// to lighting, indifferent to what is next to what - so it is kept as a
+// second opinion about whether a border is really there.
+type masks struct {
+	// shape is where contours and geometry come from.
+	shape gocv.Mat
+	// ink is what counts as a mark, always read at the full margin.
+	ink gocv.Mat
+	// global is a globally thresholded view, consulted only when a border
+	// looks incomplete in shape.
+	global gocv.Mat
+}
+
+// minThresholdC is the smallest margin worth using. Below this the
+// binarization is at the mercy of the 8-bit quantization itself.
+const minThresholdC = 10
+
+// thresholdC is the margin to binarize src with, from the noise in src.
+func (d *Detector) thresholdC(src gocv.Mat) (float32, error) {
+	sigma, err := noiseSigma(src)
+	if err != nil {
+		return 0, err
+	}
+	c := d.ThresholdCPerSigma * sigma
+	return float32(math.Min(math.Max(c, minThresholdC), float64(d.ThresholdC))), nil
+}
+
+// noiseSigma estimates the grain of the paper, in grey levels: the mean
+// absolute difference between the image and a blurred copy of itself. Ink
+// edges contribute to it too, but they are a small part of a page, so what it
+// mostly measures is the noise in the background.
+func noiseSigma(src gocv.Mat) (float64, error) {
+	blurred := gocv.NewMat()
+	defer blurred.Close()
+	if err := gocv.GaussianBlur(src, &blurred, image.Pt(5, 5), 0, 0, gocv.BorderDefault); err != nil {
+		return 0, err
+	}
+
+	diff := gocv.NewMat()
+	defer diff.Close()
+	if err := gocv.AbsDiff(src, blurred, &diff); err != nil {
+		return 0, err
+	}
+
+	mean, stddev := gocv.NewMat(), gocv.NewMat()
+	defer mean.Close()
+	defer stddev.Close()
+	if err := gocv.MeanStdDev(diff, &mean, &stddev); err != nil {
+		return 0, err
+	}
+	return mean.GetDoubleAt(0, 0), nil
+}
+
+// candidates fits a polygon to every contour in shape and keeps the ones
+// shaped like a checkbox. Geometry comes from shape, and whether a box is
+// marked is read from ink; the two are the same mask unless the page was
+// quiet enough to be binarized softly.
+func (d *Detector) candidates(m masks) []detection {
+	shape, ink := m.shape, m.ink
 	hierarchy := gocv.NewMat()
 	defer hierarchy.Close()
 
 	// RetrievalList returns holes alongside outlines, which is what lets an
 	// unchecked box be found by its interior when its border is welded to a
 	// table rule.
-	contours := gocv.FindContoursWithParams(ink, &hierarchy, gocv.RetrievalList, gocv.ChainApproxSimple)
+	contours := gocv.FindContoursWithParams(shape, &hierarchy, gocv.RetrievalList, gocv.ChainApproxSimple)
 	defer contours.Close()
 
-	shortEdge := float64(min(ink.Cols(), ink.Rows()))
+	shortEdge := float64(min(shape.Cols(), shape.Rows()))
 	maxSide := max(d.MaxSide, int(math.Round(d.MaxSideShortEdgeFrac*shortEdge)))
 	maxSide = min(maxSide, int(d.MaxSideFrac*shortEdge))
 	found := make([]detection, 0, contours.Size())
@@ -239,13 +384,14 @@ func (d *Detector) candidates(ink gocv.Mat) []detection {
 			continue
 		}
 		hull := gocv.NewPointVectorFromMat(hullMat)
-		approx := gocv.ApproxPolyDP(hull, d.ApproxEpsilonFrac*gocv.ArcLength(hull, true), true)
+		epsilon := math.Max(d.ApproxEpsilonFrac*gocv.ArcLength(hull, true), d.MinApproxEpsilon)
+		approx := gocv.ApproxPolyDP(hull, epsilon, true)
 		corners := approx.Size()
 		hullArea := gocv.ContourArea(hull)
 		approx.Close()
 		hull.Close()
 		hullMat.Close()
-		if corners != 4 {
+		if corners != 4 && corners != 5 {
 			continue
 		}
 
@@ -263,13 +409,33 @@ func (d *Detector) candidates(ink gocv.Mat) []detection {
 		if rectangularity < d.MinRectangularity {
 			continue
 		}
-		cover, ok := edgeCoverage(ink, r)
-		if !ok || cover < d.MinEdgeCoverage {
+		if corners == 5 && rectangularity < d.ExtraCornerRectangularity {
+			continue
+		}
+		cover, ok := edgeCoverage(shape, r)
+		if !ok {
+			continue
+		}
+		if cover < d.MinEdgeCoverage {
+			// The border may be there and merely have lost its contrast to
+			// the mark sitting inside it. Ask the global threshold, which
+			// cannot be fooled that way, before giving up on the box.
+			cover, ok = edgeCoverage(m.global, r)
+			if !ok || cover < d.MinEdgeCoverage {
+				continue
+			}
+		}
+
+		central, wide, ok := interiorInk(shape, ink, r)
+		if !ok || central > d.MaxInteriorInk {
 			continue
 		}
 
-		central, wide, ok := interiorInk(ink, r)
-		if !ok || central > d.MaxInteriorInk {
+		// A checkbox sits on paper. Lettering knocked out of a solid banner
+		// does not: the vertical section labels down the margin of an
+		// appraisal form - "SUBJECT", "CONTRACT" - are white letters on
+		// black, and their counters are neat little rectangles.
+		if surroundingInk(shape, r) > maxSurroundingInk {
 			continue
 		}
 		checked := central >= d.CheckedInk || wide >= d.CheckedWideInk
@@ -307,6 +473,12 @@ const (
 	interiorFrac     = 0.25
 	interiorWideFrac = 0.15
 	maxStrokeFrac    = 0.25
+
+	// maxLeadingGap is how much background a stroke scan will cross before
+	// concluding there is no border on that side. It covers a candidate
+	// rectangle sitting a pixel or two outside its own border, which is what
+	// a softly binarized contour does, and no more than that.
+	maxLeadingGap = 2
 )
 
 // strokeWidth estimates a candidate's border thickness in pixels, as the
@@ -315,12 +487,32 @@ const (
 // touch, so what the run measures is the border itself.
 func strokeWidth(ink gocv.Mat, r image.Rectangle) int {
 	limit := max(1, int(math.Round(maxStrokeFrac*float64(max(r.Dx(), r.Dy())))))
+	// Background before the stroke is skipped rather than treated as the end
+	// of it. A candidate's rectangle does not always land exactly on its own
+	// border - a softly binarized contour sits a pixel outside it - and a
+	// scan that gave up on the first white pixel reported a 3px border as 0,
+	// which left the interior window sitting on top of the border.
+	//
+	// The skipped pixels are not charged against limit, which counts stroke.
+	// Charging them would just move the problem: on a 16px box limit is 4, so
+	// two pixels of lead would leave room to count two pixels of a 3px
+	// border, and the window would sit on the border's last row instead of
+	// all of it.
 	run := func(at func(i int) (x, y int)) int {
-		n := 0
-		for i := range limit {
+		n, gap := 0, 0
+		for i := 0; n < limit; i++ {
 			x, y := at(i)
-			if x < 0 || y < 0 || x >= ink.Cols() || y >= ink.Rows() || ink.GetUCharAt(y, x) == 0 {
+			if x < 0 || y < 0 || x >= ink.Cols() || y >= ink.Rows() {
 				break
+			}
+			if ink.GetUCharAt(y, x) == 0 {
+				if n > 0 {
+					break
+				}
+				if gap++; gap > maxLeadingGap {
+					break
+				}
+				continue
 			}
 			n++
 		}
@@ -349,8 +541,13 @@ func strokeWidth(ink gocv.Mat, r image.Rectangle) int {
 // 3px border is more than 15% of the side, so the wide window would contain
 // the border and read an empty box at 0.36 ink - well past CheckedWideInk,
 // and reported as marked.
-func interiorInk(ink gocv.Mat, r image.Rectangle) (central, wide float64, ok bool) {
-	stroke := strokeWidth(ink, r)
+// The border is located in shape, which is the mask the candidate's own
+// rectangle came from, while the ink is counted in ink. On a softly binarized
+// page those differ: the fringe of a border is ink in shape and not in ink, so
+// measuring the border there and counting here is what keeps a fringe from
+// reading as a mark.
+func interiorInk(shape, ink gocv.Mat, r image.Rectangle) (central, wide float64, ok bool) {
+	stroke := strokeWidth(shape, r)
 	measure := func(frac float64) (float64, bool) {
 		dx := inset(frac, r.Dx(), stroke)
 		dy := inset(frac, r.Dy(), stroke)
@@ -421,6 +618,30 @@ func edgeCoverage(ink gocv.Mat, r image.Rectangle) (float64, bool) {
 	), true
 }
 
+// maxSurroundingInk is how much of the paper around a candidate may be inked
+// before the candidate is not sitting on paper at all. Real boxes on the
+// samples measure 0.07-0.26; lettering cut out of a solid banner measures
+// close to 1.
+const maxSurroundingInk = 0.6
+
+// surroundingInk is the inked fraction of a band of paper around r.
+func surroundingInk(ink gocv.Mat, r image.Rectangle) float64 {
+	band := max(2, int(math.Round(0.25*float64(max(r.Dx(), r.Dy())))))
+	bounds := image.Rect(0, 0, ink.Cols(), ink.Rows())
+	outer := image.Rect(r.Min.X-band, r.Min.Y-band, r.Max.X+band, r.Max.Y+band).Intersect(bounds)
+	inner := r.Intersect(bounds)
+	area := outer.Dx()*outer.Dy() - inner.Dx()*inner.Dy()
+	if area <= 0 {
+		return 0
+	}
+
+	out := ink.Region(outer)
+	defer out.Close()
+	in := ink.Region(inner)
+	defer in.Close()
+	return float64(gocv.CountNonZero(out)-gocv.CountNonZero(in)) / float64(area)
+}
+
 func inkFraction(ink gocv.Mat) float64 {
 	total := ink.Cols() * ink.Rows()
 	if total == 0 {
@@ -450,6 +671,58 @@ func blockSize(w, h int) int {
 		n++
 	}
 	return n
+}
+
+// minBoxesForSizePrior is how many candidates a page needs before its own
+// boxes are evidence of what a box on it looks like.
+const minBoxesForSizePrior = 10
+
+// dropOffSizeBoxes removes candidates whose width or height is far from the
+// page's own median.
+//
+// A printed form draws every checkbox at one size, so on a page with enough
+// of them the page itself says what a checkbox measures there. What this
+// catches is ruled table cells: they are rectangles with complete borders and
+// clean interiors, indistinguishable from a checkbox by shape, but they are
+// the width of their column rather than the width of a checkbox - 17-19px
+// against 25px on image2, 32-39px against 25-27px on image4.
+//
+// The tolerance is deliberately lopsided, because the error it has to absorb
+// is. A mark overflows its box - a bold X pokes out past the border, which is
+// why candidates are fitted to the convex hull in the first place - so a
+// measured box can come out larger than the printed one but never smaller.
+// On image6 the four widest boxes, 33-35px against a median of 29, are
+// exactly the four marked ones. A candidate well under the page's size, on
+// the other hand, cannot be one of the page's boxes at all.
+func dropOffSizeBoxes(dets []detection, under, over float64) []detection {
+	if len(dets) < minBoxesForSizePrior || (under <= 0 && over <= 0) {
+		return dets
+	}
+
+	widths := make([]int, len(dets))
+	heights := make([]int, len(dets))
+	for i, d := range dets {
+		widths[i], heights[i] = d.Box.Width, d.Box.Height
+	}
+	sort.Ints(widths)
+	sort.Ints(heights)
+	medW, medH := widths[len(widths)/2], heights[len(heights)/2]
+
+	off := func(n, median int) bool {
+		frac := float64(n-median) / float64(median)
+		if frac < 0 {
+			return under > 0 && -frac > under
+		}
+		return over > 0 && frac > over
+	}
+	kept := dets[:0:0]
+	for _, d := range dets {
+		if off(d.Box.Width, medW) || off(d.Box.Height, medH) {
+			continue
+		}
+		kept = append(kept, d)
+	}
+	return kept
 }
 
 // dedupe drops candidates that overlap or nest inside another, which is what a
