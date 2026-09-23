@@ -213,8 +213,14 @@ without form fields.
 corners" without settling whether that pixel is included. Exclusive makes
 `width == x2 - x1`, which is the prevailing convention.
 
-**Extra response fields.** `confidence`, `page` and `name` are additive to the
-specified structure. Each is information a caller cannot recover otherwise.
+**Extra response fields, and where they live.** `page` and `name` are additive
+to the specified structure and always present, because a caller cannot
+recover either one otherwise. Everything else the service knows -
+`confidence`, `method`, the `image` block, `request_id` - describes how the
+answer was reached rather than what it is, so it is behind `?detail=true`.
+The default response is the specified structure and nothing more, which keeps
+the common case exactly what was asked for while leaving the diagnostics one
+query parameter away.
 
 ## Known limitations
 
@@ -281,10 +287,7 @@ specified structure. Each is information a caller cannot recover otherwise.
 - **Recall is only spot-checked.** The 121 / 40 / 50 / 72 counts are plausible
   and the page-5 region was verified by eye, but there are no ground-truth
   labels, so precision and recall are not actually quantified. This is the
-  biggest gap in my confidence about the numbers above. The cases that read
-  those documents are behind a `samples` build tag (`make samples`), since the
-  documents are not committed: as plain skips they made a green suite on any
-  other machine look like it had covered them.
+  biggest gap in my confidence about the numbers above.
 - **Page cap.** Only the first 10 pages of a PDF are scanned, though `pages`
   reports the true total. A page with an outsized MediaBox is rendered again at
   a lower resolution that fits, with its boxes scaled back to the 300 DPI

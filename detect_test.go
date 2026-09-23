@@ -7,17 +7,30 @@ import (
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"maps"
 	"math/rand/v2"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
 
-// upload builds a multipart body with one file field and posts it to the router.
+// upload posts a file and asks for the full response, which is what most of
+// these tests are checking. uploadBrief asks for the default one.
 func upload(t *testing.T, field, filename string, content []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	return uploadTo(t, "/detect?detail=true", field, filename, content)
+}
+
+func uploadBrief(t *testing.T, field, filename string, content []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	return uploadTo(t, "/detect", field, filename, content)
+}
+
+func uploadTo(t *testing.T, target, field, filename string, content []byte) *httptest.ResponseRecorder {
 	t.Helper()
 
 	var body bytes.Buffer
@@ -33,7 +46,7 @@ func upload(t *testing.T, field, filename string, content []byte) *httptest.Resp
 		t.Fatal(err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/detect", &body)
+	req := httptest.NewRequest(http.MethodPost, target, &body)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	rec := httptest.NewRecorder()
 	newRouter().ServeHTTP(rec, req)
@@ -291,7 +304,9 @@ func TestDetectCleansUpSpilledTempFiles(t *testing.T) {
 }
 
 // The endpoint must report what the detector finds, not just echo the image.
-func TestDetectEndpointReturnsCheckboxes(t *testing.T) {
+// twoBoxForm is a page with one empty checkbox and one marked.
+func twoBoxForm(t *testing.T) []byte {
+	t.Helper()
 	form := blankForm(220, 80)
 	drawBox(form, 20, 20, 24, 1)
 	drawBox(form, 90, 20, 24, 1)
@@ -301,8 +316,87 @@ func TestDetectEndpointReturnsCheckboxes(t *testing.T) {
 	if err := png.Encode(&content, form); err != nil {
 		t.Fatal(err)
 	}
+	return content.Bytes()
+}
 
-	rec := upload(t, imageField, "form.png", content.Bytes())
+// keysOf is the top-level shape of a JSON object, sorted.
+func keysOf(t *testing.T, raw []byte) []string {
+	t.Helper()
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal %s: %v", raw, err)
+	}
+	keys := slices.Sorted(maps.Keys(obj))
+	return keys
+}
+
+// The default answer is the question that was asked and nothing else: where
+// the boxes are and which are marked. How the answer was reached - which
+// path served it, what was uploaded, how sure the detector is - is
+// explanation, and explanation is opt-in.
+func TestDetectAnswersWithoutMetadataByDefault(t *testing.T) {
+	rec := uploadBrief(t, imageField, "form.png", twoBoxForm(t))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body)
+	}
+
+	if got, want := keysOf(t, rec.Body.Bytes()), []string{"boxes"}; !slices.Equal(got, want) {
+		t.Errorf("response has %v, want %v", got, want)
+	}
+
+	var body struct {
+		Boxes []json.RawMessage `json:"boxes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Boxes) != 2 {
+		t.Fatalf("got %d detections, want 2: %s", len(body.Boxes), rec.Body)
+	}
+	for i, b := range body.Boxes {
+		if got, want := keysOf(t, b), []string{"bbox", "is_checked"}; !slices.Equal(got, want) {
+			t.Errorf("box %d has %v, want %v", i, got, want)
+		}
+	}
+}
+
+// ?detail=true puts it all back, and a bare ?detail does too.
+func TestDetectDetailRestoresMetadata(t *testing.T) {
+	content := twoBoxForm(t)
+	for _, target := range []string{"/detect?detail=true", "/detect?detail=1", "/detect?detail"} {
+		rec := uploadTo(t, target, imageField, "form.png", content)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, body = %s", target, rec.Code, rec.Body)
+		}
+
+		want := []string{"boxes", "image", "method", "request_id"}
+		if got := keysOf(t, rec.Body.Bytes()); !slices.Equal(got, want) {
+			t.Errorf("%s: response has %v, want %v", target, got, want)
+		}
+
+		got := decodeResponse(t, rec)
+		if got.Method != methodPixels {
+			t.Errorf("%s: method = %q, want %q", target, got.Method, methodPixels)
+		}
+		if len(got.Boxes) == 0 || got.Boxes[0].Confidence == 0 {
+			t.Errorf("%s: confidence missing from %+v", target, got.Boxes)
+		}
+	}
+}
+
+// A value that is not a boolean is not a request for detail.
+func TestDetectIgnoresUnparseableDetail(t *testing.T) {
+	rec := uploadTo(t, "/detect?detail=perhaps", imageField, "form.png", twoBoxForm(t))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body)
+	}
+	if got, want := keysOf(t, rec.Body.Bytes()), []string{"boxes"}; !slices.Equal(got, want) {
+		t.Errorf("response has %v, want %v", got, want)
+	}
+}
+
+func TestDetectEndpointReturnsCheckboxes(t *testing.T) {
+	rec := upload(t, imageField, "form.png", twoBoxForm(t))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body)
 	}

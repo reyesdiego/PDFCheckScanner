@@ -1,16 +1,140 @@
-# Checkbox detection API. Start the server with the "Run API" configuration,
-# then run a request below with the ▶ gutter icon (or ⌘⏎ / Ctrl+Enter).
+# Checkbox detection API. Start the server with `make run` (or the "Run API"
+# configuration), then run a request below with the ▶ gutter icon, or ⌘⏎ /
+# Ctrl+Enter. The blocks after a request are assertions: they run with it and
+# report pass or fail.
 #
-# Fixtures come from testdata/; regenerate them with:
-#   python3 testdata/gen_fixtures.py
+# The `> {% ... %}` block after a request is a response handler: it runs in
+# the IDE once the response arrives, and its results appear in the *Tests*
+# tab of the run window, beside Response and Headers - not in the response
+# body. It is a JetBrains feature; the VS Code REST Client ignores it.
 #
-# The hm*.png crops and homevision.pdf are the challenge's own sample
-# documents and are not committed, so those requests only work on a machine
-# that has them. See testdata/README.md.
+# The answer holds the boxes and nothing else; add ?detail=true for the
+# upload's metadata, which path served it, and per-box confidence.
+#
+# Every request posts a fixture from testdata/. The generated ones are rebuilt
+# with `make fixtures`; image1-4.png are real appraisal pages.
+#
+# The same thing from a shell:
+#   curl -X POST localhost:8080/detect -F "image=@testdata/form.png"
+#   curl -X POST localhost:8080/detect -F "image=@testdata/image1.png"
+#   curl -X POST "localhost:8080/detect?detail=true" -F "image=@testdata/image3.png"
+#   curl -X POST localhost:8080/detect -F "image=@testdata/image4.png"
 
 @host = http://localhost:8080
 
-### Sample crop (uncommitted): a dense form page, 100+ boxes, 30+ marked
+### The default answer: boxes only, no metadata
+POST {{host}}/detect
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="image"; filename="form.png"
+
+< ./testdata/form.png
+--Boundary--
+
+> {%
+    client.test("the answer is the answer and nothing else", function () {
+        client.assert(response.status === 200, "status " + response.status);
+        client.assert(Object.keys(response.body).join() === "boxes",
+            "top level has " + Object.keys(response.body).join());
+        const box = response.body.boxes[0];
+        client.assert(Object.keys(box).join() === "bbox,is_checked",
+            "box has " + Object.keys(box).join());
+    });
+%}
+
+### The same upload with ?detail=true: how the answer was reached
+POST {{host}}/detect?detail=true
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="image"; filename="form.png"
+
+< ./testdata/form.png
+--Boundary--
+
+> {%
+    client.test("detail brings back the explanation", function () {
+        client.assert(response.status === 200, "status " + response.status);
+        client.assert(response.body.method === "pixels", "method " + response.body.method);
+        client.assert(response.body.image.width === 420, "width " + response.body.image.width);
+        client.assert(response.body.request_id, "no request_id");
+        client.assert(response.body.boxes[0].confidence > 0, "no confidence");
+    });
+%}
+
+### A real appraisal page: 48 checkboxes, 12 of them marked
+POST {{host}}/detect
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="image"; filename="image2.png"
+
+< ./testdata/image2.png
+--Boundary--
+
+> {%
+    client.test("a dense real page is read", function () {
+        client.assert(response.status === 200, "status " + response.status);
+        const found = response.body.boxes;
+        client.assert(found.length === 48, "found " + found.length);
+        client.assert(found.filter(d => d.is_checked).length === 12,
+            "checked " + found.filter(d => d.is_checked).length);
+    });
+%}
+
+### A page scanned at ~150 DPI: 16-17px boxes, which used to read as pentagons
+# The marked boxes are fused to the form grid, so the checked count is not
+# asserted - see TestDetectFindsSmallBoxesRejectedAsPentagons.
+POST {{host}}/detect
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="image"; filename="image1.png"
+
+< ./testdata/image1.png
+--Boundary--
+
+> {%
+    client.test("small boxes on a low-DPI scan are found", function () {
+        client.assert(response.status === 200, "status " + response.status);
+        const found = response.body.boxes;
+        client.assert(found.length >= 55, "found " + found.length + ", want at least 55");
+        // Two of the boxes that were lost to the corner count, as [x1,y1,x2,y2].
+        [[814, 169], [711, 169]].forEach(function (p) {
+            client.assert(found.some(d => Math.abs(d.bbox[0] - p[0]) <= 3 &&
+                    Math.abs(d.bbox[1] - p[1]) <= 3),
+                "no checkbox at (" + p[0] + "," + p[1] + ")");
+        });
+    });
+%}
+
+### A wide appraisal page, with a lettered section banner down the margin
+POST {{host}}/detect?detail=true
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="image"; filename="image3.png"
+
+< ./testdata/image3.png
+--Boundary--
+
+> {%
+    client.test("a landscape page is read, banner letters are not", function () {
+        client.assert(response.status === 200, "status " + response.status);
+        client.assert(response.body.method === "pixels", "method " + response.body.method);
+        client.assert(response.body.image.width === 1412, "width " + response.body.image.width);
+        const found = response.body.boxes;
+        client.assert(found.length > 0, "no checkboxes found");
+        const inBanner = found.filter(d => d.bbox[2] <= 36);
+        client.assert(inBanner.length === 0,
+            inBanner.length + " checkboxes inside the section banner");
+    });
+%}
+
+### A dense appraisal page: ~118 boxes, and banner letters that are not boxes
+# Nine ruled table cells are still reported - see
+# TestDetectIgnoresLetteringInSolidBanners - so the count is a floor.
 POST {{host}}/detect
 Content-Type: multipart/form-data; boundary=Boundary
 
@@ -20,8 +144,94 @@ Content-Disposition: form-data; name="image"; filename="image4.png"
 < ./testdata/image4.png
 --Boundary--
 
->
+> {%
+    client.test("a dense page is read, banner letters are not", function () {
+        client.assert(response.status === 200, "status " + response.status);
+        const found = response.body.boxes;
+        client.assert(found.length >= 110, "found " + found.length + ", want at least 110");
+        // The banner is ~36px wide down the left edge; the leftmost real box
+        // starts at x=39.
+        const inBanner = found.filter(d => d.bbox[2] <= 36);
+        client.assert(inBanner.length === 0,
+            inBanner.length + " checkboxes inside the section banner");
+    });
+%}
 
+### An image of a form: 4 checkboxes, the middle two marked
+POST {{host}}/detect
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="image"; filename="form.png"
+
+< ./testdata/form.png
+--Boundary--
+
+> {%
+    client.test("four boxes, the middle two marked", function () {
+        client.assert(response.status === 200, "status " + response.status);
+        const checked = response.body.boxes.map(d => d.is_checked);
+        client.assert(checked.length === 4, "found " + checked.length);
+        client.assert(checked.join() === "false,true,true,false", "checked " + checked.join());
+    });
+%}
+
+### Text and checkboxes on one page: 6 boxes, the 2nd, 3rd and 6th marked
+POST {{host}}/detect
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="image"; filename="mixed.pdf"
+
+< ./testdata/mixed.pdf
+--Boundary--
+
+> {%
+    client.test("text and checkboxes on one page", function () {
+        client.assert(response.status === 200, "status " + response.status);
+        const checked = response.body.boxes.map(d => d.is_checked);
+        client.assert(checked.length === 6, "found " + checked.length);
+        client.assert(checked.join() === "false,true,true,false,false,true",
+            "checked " + checked.join());
+    });
+%}
+
+### A page of real text and not one checkbox: the false-positive canary
+POST {{host}}/detect
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="image"; filename="prose.pdf"
+
+< ./testdata/prose.pdf
+--Boundary--
+
+> {%
+    client.test("a page of prose has no checkboxes", function () {
+        client.assert(response.status === 200, "status " + response.status);
+        client.assert(response.body.boxes.length === 0,
+            "found " + response.body.boxes.length + " checkboxes on a page of text");
+    });
+%}
+
+### A WebP upload, to confirm the format is read via golang.org/x/image
+POST {{host}}/detect
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="image"; filename="patio.webp"
+
+< ./testdata/lossy.webp
+--Boundary--
+
+> {%
+    client.test("webp is decoded and measured", function () {
+        client.assert(response.status === 200, "status " + response.status);
+        client.assert(response.body.image.content_type === "image/webp",
+            "content_type " + response.body.image.content_type);
+        client.assert(response.body.image.width === 150, "width " + response.body.image.width);
+    });
+%}
 
 ### A PDF with real form fields: answered exactly, from the AcroForm
 POST {{host}}/detect
@@ -32,4 +242,115 @@ Content-Disposition: form-data; name="image"; filename="form-fields.pdf"
 
 < ./testdata/form-fields.pdf
 --Boundary--
->
+
+> {%
+    client.test("form fields answer for themselves", function () {
+        client.assert(response.status === 200, "status " + response.status);
+        const named = response.body.boxes.filter(d => d.name);
+        client.assert(named.length > 0, "no field names in the answer");
+        client.assert(named.some(d => d.name === "consent.marketing"),
+            "missing the nested field name");
+    });
+%}
+
+### A scanned PDF: no fields, so pdftoppm renders it and the detector runs
+POST {{host}}/detect?detail=true
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="image"; filename="scan.pdf"
+
+< ./testdata/scanned-form.pdf
+--Boundary--
+
+> {%
+    client.test("scanned page falls back to the pixel detector", function () {
+        client.assert(response.status === 200, "status " + response.status);
+        client.assert(response.body.method === "pixels", "method " + response.body.method);
+        const found = response.body.boxes;
+        client.assert(found.length === 8, "found " + found.length);
+        client.assert(found.filter(d => d.is_checked).length === 3,
+            "checked " + found.filter(d => d.is_checked).length);
+        client.assert(found.every(d => d.page === 1), "unexpected page number");
+    });
+%}
+
+### A PDF whose form fields are invalid: falls through to the rasterizer
+POST {{host}}/detect?detail=true
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="image"; filename="odd.pdf"
+
+< ./testdata/scanned-broken-fields.pdf
+--Boundary--
+
+> {%
+    client.test("unreadable fields do not fail the request", function () {
+        client.assert(response.status === 200, "status " + response.status);
+        client.assert(response.body.method === "pixels", "method " + response.body.method);
+        client.assert(response.body.boxes.length === 8,
+            "found " + response.body.boxes.length);
+    });
+%}
+
+### Wrong field name -> 400
+POST {{host}}/detect
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="photo"; filename="form.png"
+
+< ./testdata/form.png
+--Boundary--
+
+> {%
+    client.test("the file field must be called image", function () {
+        client.assert(response.status === 400, "status " + response.status);
+        client.assert(response.body.error.includes("image"), response.body.error);
+    });
+%}
+
+
+### A JSON body instead of an upload -> 400
+POST {{host}}/detect
+Content-Type: application/json
+
+{
+  "image_url": "https://example.com/form.png"
+}
+
+> {%
+    client.test("only multipart uploads are accepted", function () {
+        client.assert(response.status === 400, "status " + response.status);
+        client.assert(response.body.error.includes("multipart/form-data"), response.body.error);
+    });
+%}
+
+### Something that is not an image at all -> 415
+# The declared part Content-Type says png; the sniffed bytes decide otherwise.
+POST {{host}}/detect
+Content-Type: multipart/form-data; boundary=Boundary
+
+--Boundary
+Content-Disposition: form-data; name="image"; filename="not-an-image.png"
+Content-Type: image/png
+
+< ./testdata/gen_fixtures.py
+--Boundary--
+
+> {%
+    client.test("the sniffed type wins over the declared one", function () {
+        client.assert(response.status === 415, "status " + response.status);
+        client.assert(response.body.error.includes("unsupported type"), response.body.error);
+    });
+%}
+
+### GET is not routed -> 405
+GET {{host}}/detect
+
+> {%
+    client.test("detect is POST only", function () {
+        client.assert(response.status === 405, "status " + response.status);
+    });
+%}

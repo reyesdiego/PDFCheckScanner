@@ -8,6 +8,6 @@
 !/.idea/runConfigurations/
 
 # Sample appraisal documents that came with the challenge: someone else's
-# paperwork, read only by the `samples`-tagged tests. See testdata/README.md.
+# paperwork, kept out of the repository.
 /testdata/hm*.png
 /testdata/homevision.pdf

@@ -7,23 +7,47 @@ reports where the checkboxes are and which ones are marked.
 POST /detect     multipart/form-data, file field "image"
 ```
 
-## Run it with Docker Compose
+## Start it
 
-Nothing to install but Docker. The image brings its own OpenCV and poppler, so
-none of the local setup below applies.
+Nothing to install but Docker — the image brings its own OpenCV and poppler,
+so none of the local setup further down applies.
 
 ```sh
-docker compose up --build             # foreground, Ctrl-C to stop
-docker compose up -d --build          # or detached
+docker compose up --build
+```
+
+That is the whole thing: it builds the image, starts the service, and serves
+on **http://localhost:8080**. Leave it in the foreground and stop it with
+Ctrl-C, or run it detached and follow it:
+
+```sh
+docker compose up -d --build
 docker compose logs -f
 docker compose down
 ```
 
-Then, from the repo root:
+Then, from the repo root, in another shell:
 
 ```sh
 curl -X POST localhost:8080/detect -F "image=@testdata/form.png"
 ```
+
+That fixture is four checkboxes with the middle two marked, and the answer
+says so and nothing else:
+
+```json
+{
+  "boxes": [
+    { "bbox": [40, 40, 68, 68], "is_checked": false },
+    { "bbox": [140, 40, 168, 68], "is_checked": true },
+    { "bbox": [240, 40, 268, 68], "is_checked": true },
+    { "bbox": [340, 40, 368, 68], "is_checked": false }
+  ]
+}
+```
+
+More requests to try, including both PDF paths, are under
+[Trying it out](#trying-it-out).
 
 The same four commands are wrapped as `make up`, `make logs` and `make down`.
 
@@ -58,6 +82,25 @@ appraisal samples cannot reach an image.
 The tests do not run in the container, and for day-to-day work the local
 toolchain is faster to iterate with.
 
+## How it works
+
+![Checkboxes found on a page of an appraisal report](docs/img/05-result.png)
+
+Green is marked, red is not. A PDF carrying real AcroForm widgets is answered
+from its own form fields; everything else is rasterized at 300 DPI and put
+through a pixel detector that looks for **quadrilaterals, not square-ish
+blobs**, because `D` and `o` are as square as a checkbox.
+
+**[docs/PIPELINE.md](docs/PIPELINE.md) walks the whole thing through with
+figures** — the binarized page, all 348 contours in one strip, what each gate
+measures on a single box, and the before-and-after of the three bugs that real
+appraisal pages exposed: a perfect square that fitted a pentagon, ruled cells
+indistinguishable from checkboxes, and the letters of a section banner
+reported as marked boxes.
+
+Regenerate the figures with `make docs`; they are drawn by the detector itself
+from committed fixtures, so they cannot drift from the code.
+
 ## Setup for local development
 
 Go 1.27, plus two system dependencies:
@@ -84,7 +127,7 @@ make run          # go run . -addr :8080
 make run ADDR=:9000
 make build        # -> bin/api
 make test         # go test ./...
-make samples      # go test -tags samples ./... (needs the uncommitted samples)
+make smoke        # end-to-end checks with curl against a running server
 make race         # go test -race ./...
 make check        # fmt + vet + race
 make fixtures     # regenerate testdata from testdata/gen_fixtures.py
@@ -99,15 +142,27 @@ symlink above. The only flag is `-addr`.
 Run tests through `make test` or `go test ./...` — never `go test some_test.go`,
 which compiles that one file and fails with `undefined: NewDetector`.
 
-`make samples` additionally runs the cases that read the challenge's own
-appraisal documents. Those are someone else's paperwork and are not committed,
-so the cases sit behind a `samples` build tag and fail rather than skip when
-the files are absent — see `testdata/README.md`.
-
 ## Using it
 
 ```sh
 curl -X POST localhost:8080/detect -F "image=@testdata/form.png"
+```
+
+```json
+{
+  "boxes": [
+    { "bbox": [40, 40, 68, 68], "is_checked": false },
+    { "bbox": [140, 40, 168, 68], "is_checked": true }
+  ]
+}
+```
+
+The answer is the question that was asked: where each checkbox is and whether
+it is marked. Everything about *how* the answer was reached is explanation,
+and explanation is opt-in — add `?detail=true`:
+
+```sh
+curl -X POST "localhost:8080/detect?detail=true" -F "image=@testdata/form.png"
 ```
 
 ```json
@@ -122,11 +177,14 @@ curl -X POST localhost:8080/detect -F "image=@testdata/form.png"
   },
   "method": "pixels",
   "boxes": [
-    { "bbox": [40, 40, 68, 68], "is_checked": false, "confidence": 0.96 },
-    { "bbox": [140, 40, 168, 68], "is_checked": true, "confidence": 0.96 }
+    { "bbox": [40, 40, 68, 68], "is_checked": false, "confidence": 0.98 },
+    { "bbox": [140, 40, 168, 68], "is_checked": true, "confidence": 0.98 }
   ]
 }
 ```
+
+A bare `?detail` does the same; any value that is not a boolean is not a
+request for detail.
 
 `bbox` is `[x1, y1, x2, y2]` in pixels from the image's top-left. The second
 corner is **exclusive**: `width == x2 - x1`, so a 28px box at (40,40) is
@@ -134,16 +192,17 @@ corner is **exclusive**: `width == x2 - x1`, so a 28px box at (40,40) is
 
 Per box, beyond the two required fields:
 
-| field | meaning |
-| --- | --- |
-| `confidence` | 0-1. Shape-fit score from the detector, or exactly `1` for a PDF that states its own answer. |
-| `page` | 1-based page of a PDF. Omitted for images. |
-| `name` | The PDF's qualified form field name, e.g. `consent.marketing`. Omitted unless the answer came from form fields. |
+| field | meaning | |
+| --- | --- | --- |
+| `page` | 1-based page of a PDF. Omitted for images. | always |
+| `name` | The PDF's qualified form field name, e.g. `consent.marketing`. Omitted unless the answer came from form fields. | always |
+| `confidence` | 0-1. Shape-fit score from the detector, or exactly `1` for a PDF that states its own answer. | `?detail=true` |
 
-And at the top level, `method` says where the answer came from: `acroform` when
-read out of a PDF's own form fields, `pixels` when the detector looked at the
-image. For PDFs, `image.pages` counts every page in the document, even when
-only the first ten were scanned.
+And under `?detail=true`, at the top level: `method` says where the answer came
+from — `acroform` when read out of a PDF's own form fields, `pixels` when the
+detector looked at the image — `image` describes the upload, and `request_id`
+matches the server log. For PDFs, `image.pages` counts every page in the
+document, even when only the first ten were scanned.
 
 ### Accepted uploads
 
@@ -165,6 +224,121 @@ letter are both just blobs (see the writeup).
 | 500 | the image decoded but could not be examined |
 | 503 | a scanned PDF arrived but `pdftoppm` is not installed |
 | 504 | the PDF took longer than the 30s request timeout |
+
+## Trying it out
+
+Start the server (`make run`, or `make up` for the container), then:
+
+```sh
+# an image: 4 checkboxes, the middle two marked
+curl -X POST localhost:8080/detect -F "image=@testdata/form.png"
+
+# a real appraisal page: 48 checkboxes, 12 of them marked
+curl -X POST localhost:8080/detect -F "image=@testdata/image2.png"
+
+# a ~150 DPI scan with 16-17px boxes: at least 55 found
+curl -X POST localhost:8080/detect -F "image=@testdata/image1.png"
+
+# a landscape appraisal page with a lettered section banner
+curl -X POST localhost:8080/detect -F "image=@testdata/image3.png"
+
+# a dense page: at least 110 boxes, none of them banner letters
+curl -X POST localhost:8080/detect -F "image=@testdata/image4.png"
+
+# a PDF with real form fields: answered from the AcroForm, not the pixels
+curl -X POST localhost:8080/detect -F "image=@testdata/form-fields.pdf"
+
+# a flattened PDF: pdftoppm renders it and the detector runs
+curl -X POST localhost:8080/detect -F "image=@testdata/scanned-form.pdf"
+
+# a page of text and no checkboxes: the false-positive canary, expect []
+curl -X POST localhost:8080/detect -F "image=@testdata/prose.pdf"
+```
+
+The field name must be `image`; anything else is a 400. Piping through `jq`
+makes the answer easier to read, and these two are the ones worth looking at:
+
+```sh
+curl -s -X POST localhost:8080/detect -F "image=@testdata/mixed.pdf" \
+  | jq '{total: (.boxes | length), checked: [.boxes[] | select(.is_checked)] | length}'
+# { "total": 6, "checked": 3 }
+
+curl -s -X POST "localhost:8080/detect?detail=true" -F "image=@testdata/form-fields.pdf" \
+  | jq '.method, [.boxes[] | {name, is_checked}]'
+# "acroform", with the PDF's own field names
+```
+
+### Asserting from the shell
+
+The curl calls above show you the answer; `scripts/smoke.sh` checks it. It
+makes the same requests `api.http` does and asserts the same things, so it
+needs no IDE and can gate a deploy — it exits non-zero if anything is off.
+
+```sh
+make run          # or make up, in another shell
+make smoke        # or: scripts/smoke.sh
+```
+
+```
+== the shape of the answer
+ok   default response has only boxes
+ok   a box has only bbox and is_checked
+ok   ?detail=true adds the metadata
+...
+== the error paths
+ok   wrong field name -> 400
+ok   GET is not routed -> 405
+
+22 passed, 0 failed
+```
+
+A failure prints what it wanted and what it got:
+
+```
+FAIL image2.png: 48 boxes, 12 of them marked
+       want: 48 12
+        got: 51 12
+```
+
+It needs `curl` and `jq`, runs from the repository root, and takes `HOST` to
+point somewhere else:
+
+```sh
+HOST=http://localhost:9000 scripts/smoke.sh
+```
+
+The single checks it is built from are worth knowing on their own, because
+they are how you assert one thing by hand:
+
+```sh
+# how many boxes, how many marked
+curl -s -X POST localhost:8080/detect -F "image=@testdata/image2.png" \
+  | jq '"\(.boxes | length) boxes, \([.boxes[] | select(.is_checked)] | length) marked"'
+
+# the marked pattern, in reading order
+curl -s -X POST localhost:8080/detect -F "image=@testdata/form.png" \
+  | jq -r '[.boxes[].is_checked | tostring] | join(",")'
+
+# just the status code, for the error paths
+curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/detect \
+  -F "photo=@testdata/form.png"
+```
+
+### From the IDE
+
+`api.http` holds the same requests with assertions attached, runnable from
+GoLand with the ▶ icon in the gutter (⌘⏎ / Ctrl+Enter). The `> {% ... %}`
+block after a request is a **response handler**: the IDE runs it when the
+response arrives, and `client.test` / `client.assert` report into the
+**Tests** tab of the run window, next to Response and Headers — not into the
+response body, which is why the assertions look invisible if you only read
+the response. Response handlers are a JetBrains feature; the VS Code REST
+Client will send these requests but silently ignore the assertions.
+It covers every committed fixture — both PDF paths, WebP decoding, the prose
+canary — and the error paths: wrong field name, a JSON body, a file that is
+not an image, and `GET` on a POST-only route. The assertion blocks check the
+status, the `method`, and the exact box and checked counts, so running the
+file top to bottom is a quick end-to-end check of the service.
 
 ## Layout
 

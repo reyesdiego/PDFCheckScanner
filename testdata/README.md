@@ -18,22 +18,9 @@ changing what they should contain:
 | `image3.png` | Another appraisal page, 1412x816. No test of its own; further real-document input. |
 | `image4.png` | A dense appraisal page, 1118x1820, with 118 checkboxes of 25-27px. The page that exposed the section banners: the word set vertically down the margin in white on black had ten of its letters read as checked boxes. Nine ruled table cells holding a word, 32-39px wide, are still reported and are the known remainder. |
 
-## The uncommitted samples
-
-`hm1.png` ... `hm11.png` are crops of the sample appraisal documents that came
-with the challenge, and `homevision.pdf` is the challenge description itself.
-They are someone else's paperwork, so they are not committed here.
-
-The tests that read them are behind the `samples` build tag:
-
-    make samples          # go test -tags samples ./...
-
-Without the tag they are not compiled, and with it a missing file is a
-failure. They used to skip when absent, which meant that on any machine but
-the author's the suite went green having exercised none of the real-document
-behaviour. Most of those cases are regression floors taken from measured
-behaviour rather than hand-labelled ground truth, so they catch a collapse in
-recall, not every individual mistake.
+Both `api.http` and `scripts/smoke.sh` post these fixtures at a running
+server and assert on the answers, so their expectations have to move together
+with this table.
 
 ## Why the text fixtures are PDFs
 

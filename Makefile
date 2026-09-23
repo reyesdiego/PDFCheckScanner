@@ -14,7 +14,7 @@ export PKG_CONFIG_PATH := /opt/homebrew/opt/opencv@4/lib/pkgconfig
 
 ADDR ?= :8080
 
-.PHONY: run build test samples race vet fmt fixtures check up down logs
+.PHONY: run build test smoke race vet fmt fixtures docs check up down logs
 
 run:            ## start the API
 	go run . -addr $(ADDR)
@@ -27,11 +27,10 @@ build:
 test:
 	go test ./...
 
-# The sample appraisal documents are not committed, so the tests that read
-# them are behind a build tag and fail loudly rather than skipping. Needs
-# testdata/hm*.png and testdata/homevision.pdf.
-samples:
-	go test -tags samples ./...
+# End-to-end checks against a running server: the same requests api.http
+# makes, asserted from the shell. Needs curl and jq, and the service up.
+smoke:
+	scripts/smoke.sh
 
 race:
 	go test -race ./...
@@ -45,6 +44,10 @@ fmt:
 # Regenerate testdata from testdata/gen_fixtures.py.
 fixtures:
 	python3 testdata/gen_fixtures.py
+
+# Regenerate the figures in docs/img that docs/PIPELINE.md walks through.
+docs:
+	go test -tags docs -run TestGenerateDocImages ./...
 
 # Docker Compose brings its own OpenCV and poppler, so none of the setup at
 # the top of this file applies to it.

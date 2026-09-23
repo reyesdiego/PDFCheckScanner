@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	// Registered so image.DecodeConfig can read these formats' headers.
@@ -52,6 +53,10 @@ var allowedTypes = map[string]bool{
 	pdfType:      true,
 }
 
+// detectResponse is the full answer, returned only when the caller asks for
+// it with ?detail=true. Everything in it beyond the boxes is explanation:
+// what was uploaded, which of the two paths answered, and how sure the
+// detector is.
 type detectResponse struct {
 	RequestID string    `json:"request_id,omitempty"`
 	Image     imageInfo `json:"image"`
@@ -59,6 +64,58 @@ type detectResponse struct {
 	// PDF's own form fields, "pixels" when found by the image detector.
 	Method string      `json:"method"`
 	Boxes  []detection `json:"boxes"`
+}
+
+// briefResponse is the default: where the checkboxes are and which are
+// marked, which is the question the endpoint was asked.
+type briefResponse struct {
+	Boxes []briefDetection `json:"boxes"`
+}
+
+// briefDetection is a detection without the detector's own bookkeeping.
+// Confidence belongs with the metadata: it describes how the answer was
+// arrived at, not what the answer is.
+type briefDetection struct {
+	Box     box    `json:"bbox"`
+	Checked bool   `json:"is_checked"`
+	Page    int    `json:"page,omitempty"`
+	Name    string `json:"name,omitempty"`
+}
+
+// detailParam asks for the full response.
+const detailParam = "detail"
+
+// wantsDetail reports whether the request asked for the full response, by
+// ?detail=true or a bare ?detail. Any other value is not detail.
+func wantsDetail(r *http.Request) bool {
+	q := r.URL.Query()
+	if !q.Has(detailParam) {
+		return false
+	}
+	if raw := q.Get(detailParam); raw != "" {
+		on, err := strconv.ParseBool(raw)
+		return err == nil && on
+	}
+	return true
+}
+
+// respondDetections writes the checkboxes in whichever shape was asked for.
+func respondDetections(w http.ResponseWriter, r *http.Request, info imageInfo, method string, dets []detection) {
+	if wantsDetail(r) {
+		writeJSON(w, http.StatusOK, detectResponse{
+			RequestID: middleware.GetReqID(r.Context()),
+			Image:     info,
+			Method:    method,
+			Boxes:     dets,
+		})
+		return
+	}
+
+	brief := make([]briefDetection, len(dets))
+	for i, d := range dets {
+		brief[i] = briefDetection{Box: d.Box, Checked: d.Checked, Page: d.Page, Name: d.Name}
+	}
+	writeJSON(w, http.StatusOK, briefResponse{Boxes: brief})
 }
 
 type imageInfo struct {
@@ -189,12 +246,7 @@ func handleDetect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, detectResponse{
-		RequestID: middleware.GetReqID(r.Context()),
-		Image:     info,
-		Method:    methodPixels,
-		Boxes:     boxes,
-	})
+	respondDetections(w, r, info, methodPixels, boxes)
 }
 
 // handlePDF spools the upload to disk, which both pdfcpu and pdftoppm need,
@@ -221,12 +273,7 @@ func handlePDF(w http.ResponseWriter, r *http.Request, file io.Reader, info imag
 	}
 	info.Pages = pages
 
-	writeJSON(w, http.StatusOK, detectResponse{
-		RequestID: middleware.GetReqID(r.Context()),
-		Image:     info,
-		Method:    method,
-		Boxes:     dets,
-	})
+	respondDetections(w, r, info, method, dets)
 }
 
 // spool copies an upload to a temp file and returns its path.

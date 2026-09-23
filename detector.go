@@ -131,6 +131,11 @@ type Detector struct {
 	// neighbourhood looks like. Adaptive thresholding alone hollows out large
 	// solid areas, because the middle of a blob has no local contrast.
 	DarkFloor float32
+	// MaxSurroundingInk is how much of the paper around a candidate may be
+	// inked before the candidate is not sitting on paper at all. Real boxes
+	// on the samples measure 0.07-0.26; lettering cut out of a solid banner
+	// measures close to 1.
+	MaxSurroundingInk float64
 	// UndersizeFrac is how far below the median of the page's own boxes a
 	// box may measure; OversizeFrac is how far above. See dropOffSizeBoxes
 	// for why the two differ.
@@ -161,6 +166,7 @@ func NewDetector() *Detector {
 		ThresholdCPerSigma:        2.5,
 		MaxInkFrac:                0.6,
 		DarkFloor:                 90,
+		MaxSurroundingInk:         0.6,
 		UndersizeFrac:             0.15,
 		OversizeFrac:              0.25,
 		MaxDetections:             500,
@@ -435,7 +441,7 @@ func (d *Detector) candidates(m masks) []detection {
 		// does not: the vertical section labels down the margin of an
 		// appraisal form - "SUBJECT", "CONTRACT" - are white letters on
 		// black, and their counters are neat little rectangles.
-		if surroundingInk(shape, r) > maxSurroundingInk {
+		if surroundingInk(shape, r) > d.MaxSurroundingInk {
 			continue
 		}
 		checked := central >= d.CheckedInk || wide >= d.CheckedWideInk
@@ -617,12 +623,6 @@ func edgeCoverage(ink gocv.Mat, r image.Rectangle) (float64, bool) {
 		min(strip(left, 1), strip(right, 1)),
 	), true
 }
-
-// maxSurroundingInk is how much of the paper around a candidate may be inked
-// before the candidate is not sitting on paper at all. Real boxes on the
-// samples measure 0.07-0.26; lettering cut out of a solid banner measures
-// close to 1.
-const maxSurroundingInk = 0.6
 
 // surroundingInk is the inked fraction of a band of paper around r.
 func surroundingInk(ink gocv.Mat, r image.Rectangle) float64 {
