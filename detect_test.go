@@ -213,8 +213,12 @@ func TestDetectIgnoresDeclaredPartContentType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	part.Write([]byte("#!/bin/sh\nrm -rf /\n"))
-	mw.Close()
+	if _, err := part.Write([]byte("#!/bin/sh\nrm -rf /\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	req := httptest.NewRequest(http.MethodPost, "/detect", &body)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
