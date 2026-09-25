@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -30,7 +31,8 @@ func main() {
 }
 
 // run serves on addr until the server fails or ctx is cancelled or the process
-// is interrupted, then gives in-flight requests 10s to finish.
+// is interrupted, then gives in-flight requests 10s to finish. It returns only
+// once the server has fully stopped, so nothing it started outlives it.
 func run(ctx context.Context, addr string, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -49,22 +51,42 @@ func run(ctx context.Context, addr string, logger *slog.Logger) error {
 			"binary", rasterizer)
 	}
 
+	// Binding here rather than inside ListenAndServe makes a failure to start,
+	// such as the port being taken, an immediate error before anything else
+	// is running, and means "listening" is only logged once it is true.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+	logger.Info("listening", "addr", ln.Addr().String())
+
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.ListenAndServe() }()
-	logger.Info("listening", "addr", addr)
+	go func() { serveErr <- srv.Serve(ln) }()
 
 	select {
 	case err := <-serveErr:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
-		return fmt.Errorf("listen: %w", err)
+		// Serve closes the listener itself when it fails.
+		return fmt.Errorf("serve: %w", err)
 	case <-ctx.Done():
-		logger.Info("shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return srv.Shutdown(shutdownCtx)
 	}
+
+	logger.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	shutdownErr := srv.Shutdown(shutdownCtx)
+	if shutdownErr != nil {
+		// Requests outlived the grace period; cut their connections.
+		srv.Close()
+	}
+	// Either way Serve now returns ErrServerClosed. Waiting for it means the
+	// serving goroutine has exited by the time run does.
+	if err := <-serveErr; !errors.Is(err, http.ErrServerClosed) {
+		return errors.Join(shutdownErr, fmt.Errorf("serve: %w", err))
+	}
+	if shutdownErr != nil {
+		return fmt.Errorf("shutdown: %w", shutdownErr)
+	}
+	return nil
 }
 
 // detector is stateless and safe for concurrent use, so one instance serves
