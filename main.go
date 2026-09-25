@@ -22,6 +22,7 @@ func main() {
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
 	if err := run(context.Background(), *addr, logger); err != nil {
 		logger.Error("server failed", "err", err)
 		os.Exit(1)

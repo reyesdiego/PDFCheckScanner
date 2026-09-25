@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"io/fs"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -193,6 +195,13 @@ func handleDetect(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("upload must be at most %d bytes", int64(maxUploadBytes)))
 			return
 		}
+		// A large upload spills to a temp file; failing to write it is the
+		// server's problem, not a malformed request.
+		var pathErr *fs.PathError
+		if errors.As(err, &pathErr) {
+			internalError(w, r, "could not buffer the upload", err)
+			return
+		}
 		writeError(w, http.StatusBadRequest,
 			fmt.Sprintf("request must be multipart/form-data with an %q file field", imageField))
 		return
@@ -247,7 +256,7 @@ func handleDetect(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// The image was fine; examining it was not. Reporting no checkboxes
 		// here would be indistinguishable from a blank form.
-		writeError(w, http.StatusInternalServerError, "could not examine the uploaded image")
+		internalError(w, r, "could not examine the uploaded image", err)
 		return
 	}
 
@@ -259,7 +268,7 @@ func handleDetect(w http.ResponseWriter, r *http.Request) {
 func handlePDF(w http.ResponseWriter, r *http.Request, file io.Reader, info imageInfo) {
 	path, cleanup, err := spool(file)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not buffer the uploaded pdf")
+		internalError(w, r, "could not buffer the uploaded pdf", err)
 		return
 	}
 	defer cleanup()
@@ -272,8 +281,11 @@ func handlePDF(w http.ResponseWriter, r *http.Request, file io.Reader, info imag
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		writeError(w, http.StatusGatewayTimeout, "pdf took too long to process")
 		return
-	case err != nil:
+	case errors.Is(err, errUnreadablePDF):
 		writeError(w, http.StatusUnprocessableEntity, "could not read the uploaded pdf")
+		return
+	case err != nil:
+		internalError(w, r, "could not examine the uploaded pdf", err)
 		return
 	}
 	info.Pages = pages
@@ -359,4 +371,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // writeError sends msg as a JSON {"error": msg} body.
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// internalError answers 500 with msg and logs err, which the client never
+// sees, under the request's ID so the two can be matched up.
+func internalError(w http.ResponseWriter, r *http.Request, msg string, err error) {
+	slog.ErrorContext(r.Context(), msg,
+		"request_id", middleware.GetReqID(r.Context()), "err", err)
+	writeError(w, http.StatusInternalServerError, msg)
 }

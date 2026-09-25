@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"image"
 	"image/color"
+	"image/gif"
 	"image/jpeg"
 	"image/png"
 	"maps"
@@ -32,6 +34,15 @@ func uploadBrief(t *testing.T, field, filename string, content []byte) *httptest
 
 func uploadTo(t *testing.T, target, field, filename string, content []byte) *httptest.ResponseRecorder {
 	t.Helper()
+	rec := httptest.NewRecorder()
+	newRouter().ServeHTTP(rec, uploadRequest(t, target, field, filename, content))
+	return rec
+}
+
+// uploadRequest builds the multipart request uploadTo sends, for tests that
+// need to change it first.
+func uploadRequest(t *testing.T, target, field, filename string, content []byte) *http.Request {
+	t.Helper()
 
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
@@ -48,9 +59,7 @@ func uploadTo(t *testing.T, target, field, filename string, content []byte) *htt
 
 	req := httptest.NewRequest(http.MethodPost, target, &body)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
-	rec := httptest.NewRecorder()
-	newRouter().ServeHTTP(rec, req)
-	return rec
+	return req
 }
 
 func samplePNG(t *testing.T, w, h int) []byte {
@@ -623,5 +632,100 @@ func TestDetectEndpointUsesSpecifiedKeys(t *testing.T) {
 	if strings.Contains(rec.Body.String(), `"detections"`) ||
 		strings.Contains(rec.Body.String(), `"checked":`) {
 		t.Errorf("response still carries the old keys: %s", rec.Body)
+	}
+}
+
+func TestDetectAcceptsGIFUpload(t *testing.T) {
+	form := blankForm(120, 80)
+	drawBox(form, 20, 20, 24, 2)
+	var content bytes.Buffer
+	if err := gif.Encode(&content, form, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := upload(t, imageField, "form.gif", content.Bytes())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body)
+	}
+	got := decodeResponse(t, rec)
+	if got.Image.ContentType != "image/gif" {
+		t.Errorf("content type = %q, want image/gif", got.Image.ContentType)
+	}
+	if len(got.Boxes) != 1 {
+		t.Errorf("got %d boxes, want 1", len(got.Boxes))
+	}
+}
+
+// An inverted scan is white on black, which the detector does not handle. It
+// must answer with no boxes rather than guess, and say so as [] not null.
+func TestDetectAnswersNoBoxesForMostlyInkImage(t *testing.T) {
+	form := image.NewGray(image.Rect(0, 0, 200, 200))
+	for i := 40; i < 68; i++ {
+		for _, p := range [][2]int{{i, 40}, {i, 67}, {40, i}, {67, i}} {
+			form.SetGray(p[0], p[1], color.Gray{Y: 255})
+		}
+	}
+	var content bytes.Buffer
+	if err := png.Encode(&content, form); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := uploadBrief(t, imageField, "inverted.png", content.Bytes())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body)
+	}
+	if body := strings.TrimSpace(rec.Body.String()); body != `{"boxes":[]}` {
+		t.Errorf("body = %s, want {\"boxes\":[]}", body)
+	}
+}
+
+func TestDetectEndpointReportsMissingRasterizer(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	rec := upload(t, imageField, "scan.pdf", uploadFile(t, "testdata/scanned-form.pdf"))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503, body = %s", rec.Code, rec.Body)
+	}
+	if msg := errorMessage(t, rec); !strings.Contains(msg, rasterizer) {
+		t.Errorf("error %q does not name %s", msg, rasterizer)
+	}
+}
+
+// A request abandoned mid-render must not be reported as a bad PDF.
+func TestDetectEndpointReportsAbandonedPDFAsTimeout(t *testing.T) {
+	requireRasterizer(t)
+
+	req := uploadRequest(t, "/detect", imageField, "scan.pdf",
+		uploadFile(t, "testdata/scanned-form.pdf"))
+	ctx, cancel := context.WithCancel(req.Context())
+	cancel()
+	rec := httptest.NewRecorder()
+	newRouter().ServeHTTP(rec, req.WithContext(ctx))
+
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d, want 504, body = %s", rec.Code, rec.Body)
+	}
+	errorMessage(t, rec)
+}
+
+// Failing to write temp files is the server's fault, so it must be a 500 and
+// not the 400 or 422 that would tell the client to fix its upload.
+func TestDetectReportsUnwritableTempDirAsServerError(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir()+"/missing")
+
+	big := noisyPNG(t, 1100, 1100)
+	if len(big) <= maxMemoryBytes {
+		t.Fatalf("test image is %d bytes, need more than maxMemoryBytes (%d)", len(big), maxMemoryBytes)
+	}
+	for name, content := range map[string][]byte{
+		"spilled image": big,
+		"pdf":           uploadFile(t, "testdata/scanned-form.pdf"),
+	} {
+		rec := upload(t, imageField, "upload", content)
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("%s: status = %d, want 500, body = %s", name, rec.Code, rec.Body)
+			continue
+		}
+		errorMessage(t, rec)
 	}
 }

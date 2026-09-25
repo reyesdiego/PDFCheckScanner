@@ -52,6 +52,10 @@ const (
 // deployment problem rather than a bad request.
 var errNoRasterizer = errors.New(rasterizer + " is not installed, so scanned PDFs cannot be rasterized")
 
+// errUnreadablePDF reports that the upload itself is at fault: pdftoppm could
+// not render it. Any other failure on the PDF path is the server's problem.
+var errUnreadablePDF = errors.New("pdf could not be rendered")
+
 // detectPDF finds the checkboxes in a PDF at path.
 //
 // A PDF that carries real AcroForm checkbox widgets already knows its own
@@ -309,7 +313,7 @@ func rasterCheckboxes(ctx context.Context, path string, pages int) ([]detection,
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, 0, ctxErr
 		}
-		return nil, 0, fmt.Errorf("%s: %w: %s", rasterizer, err, strings.TrimSpace(string(out)))
+		return nil, 0, fmt.Errorf("%w: %s: %w: %s", errUnreadablePDF, rasterizer, err, strings.TrimSpace(string(out)))
 	}
 
 	files, err := filepath.Glob(filepath.Join(dir, "page-*.png"))
@@ -317,7 +321,7 @@ func rasterCheckboxes(ctx context.Context, path string, pages int) ([]detection,
 		return nil, 0, err
 	}
 	if len(files) == 0 {
-		return nil, 0, fmt.Errorf("%s produced no pages", rasterizer)
+		return nil, 0, fmt.Errorf("%w: %s produced no pages", errUnreadablePDF, rasterizer)
 	}
 
 	dets := make([]detection, 0)

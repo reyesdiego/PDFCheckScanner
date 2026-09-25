@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
 
+	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 )
@@ -394,6 +396,64 @@ func TestDetectPDFFindsBoxesAmongText(t *testing.T) {
 		if d.Checked != want[i] {
 			t.Errorf("[%d] at (%d,%d) checked = %v, want %v",
 				i, d.Box.X, d.Box.Y, d.Checked, want[i])
+		}
+	}
+}
+
+// Only pdftoppm refusing the file makes it the client's fault; the handler
+// turns that into a 422 and everything else into a 500.
+func TestDetectPDFSeparatesBadInputFromServerFailure(t *testing.T) {
+	requireRasterizer(t)
+
+	garbage := t.TempDir() + "/broken.pdf"
+	if err := os.WriteFile(garbage, []byte("%PDF-1.4\nnot really a pdf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := detectPDF(context.Background(), garbage); !errors.Is(err, errUnreadablePDF) {
+		t.Errorf("garbage: err = %v, want errUnreadablePDF", err)
+	}
+
+	t.Setenv("TMPDIR", t.TempDir()+"/missing")
+	_, _, _, err := detectPDF(context.Background(), "testdata/scanned-form.pdf")
+	if err == nil {
+		t.Fatal("no temp dir: detectPDF succeeded, want error")
+	}
+	if errors.Is(err, errUnreadablePDF) {
+		t.Errorf("no temp dir: err = %v, blames the pdf", err)
+	}
+}
+
+func TestDetectPDFScansOnlyTheFirstPages(t *testing.T) {
+	requireRasterizer(t)
+
+	const total = maxPDFPages + 2
+	in := make([]string, total)
+	for i := range in {
+		in[i] = "testdata/scanned-form.pdf"
+	}
+	path := t.TempDir() + "/long.pdf"
+	if err := api.MergeCreateFile(in, path, false, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	dets, pages, _, err := detectPDF(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pages != total {
+		t.Errorf("pages = %d, want the true total %d", pages, total)
+	}
+	perPage := make(map[int]int)
+	for _, d := range dets {
+		perPage[d.Page]++
+	}
+	for page := 1; page <= total; page++ {
+		want := 8
+		if page > maxPDFPages {
+			want = 0
+		}
+		if perPage[page] != want {
+			t.Errorf("page %d: %d boxes, want %d", page, perPage[page], want)
 		}
 	}
 }

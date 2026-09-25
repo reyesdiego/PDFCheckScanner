@@ -233,12 +233,15 @@ Content-Type: application/json
 | 415 | the file is empty | `uploaded file is empty` |
 | 415 | the file is not a supported type | `unsupported type "text/plain", want one of: ...` |
 | 415 | the image is malformed or truncated | `could not decode the uploaded image` |
-| 422 | the PDF cannot be read at all | `could not read the uploaded pdf` |
-| 500 | the image decoded but could not be examined | `could not examine the uploaded image` |
+| 422 | the PDF cannot be rendered | `could not read the uploaded pdf` |
+| 500 | the server failed while examining the upload | `could not examine the uploaded image` or `... pdf` |
+| 500 | the server could not write the upload to a temp file | `could not buffer the upload` or `... uploaded pdf` |
 | 503 | a scanned PDF arrived and `pdftoppm` is not installed | `pdftoppm is not installed, so scanned PDFs cannot be rasterized` |
 | 504 | the PDF took longer than the 30s request timeout | `pdf took too long to process` |
 
-Branch on the status code; the messages are for people and may change. The
+A 500 is the server's fault. Its cause goes to the server log with the
+request ID, never to the client. Branch on the status code; the
+messages are for people and may change. The
 router's own 405 (a method other than `POST`) and 404 (any other path) have no
 JSON body.
 
