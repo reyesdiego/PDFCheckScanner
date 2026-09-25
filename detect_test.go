@@ -270,6 +270,36 @@ func TestDetectRejectsWrongFieldName(t *testing.T) {
 	errorMessage(t, rec)
 }
 
+// Two files in the one field would otherwise be answered about the first
+// alone, with nothing in the response to say so.
+func TestDetectRejectsMoreThanOneImage(t *testing.T) {
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	for _, name := range []string{"first.png", "second.png"} {
+		part, err := mw.CreateFormFile(imageField, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := part.Write(samplePNG(t, 2, 2)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/detect", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	newRouter().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body)
+	}
+	if msg := errorMessage(t, rec); !strings.Contains(msg, "got 2") {
+		t.Errorf("error %q does not say how many files arrived", msg)
+	}
+}
+
 func TestDetectRejectsNonMultipartBody(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/detect",
 		strings.NewReader(`{"image_url":"https://example.com/house.jpg"}`))

@@ -209,6 +209,17 @@ func handleDetect(w http.ResponseWriter, r *http.Request) {
 	// Parsing may have spilled the upload to a temp file; drop it on the way out.
 	defer r.MultipartForm.RemoveAll()
 
+	// FormFile would quietly take the first of several files, and the answer
+	// would then be about one of them without saying which.
+	switch n := len(r.MultipartForm.File[imageField]); {
+	case n == 0:
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("missing %q file field", imageField))
+		return
+	case n > 1:
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("send exactly one %q file, got %d", imageField, n))
+		return
+	}
 	file, header, err := r.FormFile(imageField)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("missing %q file field", imageField))

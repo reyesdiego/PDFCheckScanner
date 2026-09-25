@@ -24,19 +24,23 @@ func main() {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
-	if err := run(context.Background(), *addr, logger); err != nil {
+
+	// Interrupt and SIGTERM cancel ctx, which is what tells run to shut down.
+	// stop releases the signal handler, and runs before os.Exit, which would
+	// skip a deferred call.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	err := run(ctx, *addr, logger)
+	stop()
+	if err != nil {
 		logger.Error("server failed", "err", err)
 		os.Exit(1)
 	}
 }
 
-// run serves on addr until the server fails or ctx is cancelled or the process
-// is interrupted, then gives in-flight requests 10s to finish. It returns only
-// once the server has fully stopped, so nothing it started outlives it.
+// run serves on addr until the server fails or ctx is cancelled, then gives
+// in-flight requests 10s to finish. It returns only once the server has fully
+// stopped, so nothing it started outlives it.
 func run(ctx context.Context, addr string, logger *slog.Logger) error {
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           newRouter(),

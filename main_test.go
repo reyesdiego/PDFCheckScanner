@@ -6,8 +6,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
-	"os/signal"
 	"runtime"
 	"strings"
 	"testing"
@@ -46,15 +44,6 @@ func waitFor(t *testing.T, done <-chan error, within time.Duration) error {
 	}
 }
 
-// goroutineBaseline counts running goroutines once os/signal has started its
-// watcher, which it does on first use and never stops: that one is the
-// runtime's, not a leak of run's.
-func goroutineBaseline() int {
-	_, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	stop()
-	return runtime.NumGoroutine()
-}
-
 // requireGoroutinesBackTo fails if goroutines started during the test are
 // still running, allowing a moment for exiting ones to be reaped.
 func requireGoroutinesBackTo(t *testing.T, baseline int) {
@@ -75,7 +64,7 @@ func TestRunFailsFastWhenThePortIsTaken(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer taken.Close()
-	baseline := goroutineBaseline()
+	baseline := runtime.NumGoroutine()
 
 	err = waitFor(t, runInBackground(context.Background(), taken.Addr().String()), 5*time.Second)
 	if err == nil || !strings.Contains(err.Error(), "listen") {
@@ -86,7 +75,7 @@ func TestRunFailsFastWhenThePortIsTaken(t *testing.T) {
 
 func TestRunStopsCleanlyWhenCancelled(t *testing.T) {
 	addr := freeAddr(t)
-	baseline := goroutineBaseline()
+	baseline := runtime.NumGoroutine()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -229,6 +229,7 @@ Content-Type: application/json
 | --- | --- | --- |
 | 400 | the body is not `multipart/form-data` | `request must be multipart/form-data with an "image" file field` |
 | 400 | there is no `image` file field | `missing "image" file field` |
+| 400 | the `image` field holds more than one file | `send exactly one "image" file, got 2` |
 | 413 | the upload is over 10 MiB | `upload must be at most 10485760 bytes` |
 | 413 | the image is over 24 million pixels | `image must be at most 24000000 pixels, got 5000x5000` |
 | 415 | the file is empty | `uploaded file is empty` |
