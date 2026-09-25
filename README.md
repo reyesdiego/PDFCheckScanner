@@ -3,7 +3,7 @@
 An HTTP service with one endpoint. Give it a document image or a PDF and it
 reports where the checkboxes are and which ones are marked.
 
-```
+```text
 POST /detect     multipart/form-data, file field "image"
 ```
 
@@ -225,6 +225,16 @@ letter are both just blobs (see the writeup).
 | 503 | a scanned PDF arrived but `pdftoppm` is not installed |
 | 504 | the PDF took longer than the 30s request timeout |
 
+Every error from `/detect` is JSON with a single `error` field saying what was
+wrong:
+
+```json
+{ "error": "unsupported type \"text/plain\", want one of: application/pdf, image/gif, image/jpeg, image/png, image/webp" }
+```
+
+Only the router answers outside that shape: a method other than `POST` on
+`/detect` is a 405 and any other path is a 404, both with no JSON body.
+
 ## Trying it out
 
 Start the server (`make run`, or `make up` for the container), then:
@@ -279,7 +289,7 @@ make run          # or make up, in another shell
 make smoke        # or: scripts/smoke.sh
 ```
 
-```
+```text
 == the shape of the answer
 ok   default response has only boxes
 ok   a box has only bbox and is_checked
@@ -294,7 +304,7 @@ ok   GET is not routed -> 405
 
 A failure prints what it wanted and what it got:
 
-```
+```text
 FAIL image2.png: 48 boxes, 12 of them marked
        want: 48 12
         got: 51 12
@@ -334,6 +344,7 @@ response arrives, and `client.test` / `client.assert` report into the
 response body, which is why the assertions look invisible if you only read
 the response. Response handlers are a JetBrains feature; the VS Code REST
 Client will send these requests but silently ignore the assertions.
+
 It covers every committed fixture — both PDF paths, WebP decoding, the prose
 canary — and the error paths: wrong field name, a JSON body, a file that is
 not an image, and `GET` on a POST-only route. The assertion blocks check the
