@@ -237,6 +237,33 @@ func TestDetectPDFFallsBackWhenFieldsAreUnreadable(t *testing.T) {
 	}
 }
 
+// A checkbox field that cannot be placed must not be dropped from an answer
+// that claims to be exact: the whole document goes to the pixels instead,
+// where all eight printed boxes are found.
+func TestDetectPDFFallsBackWhenACheckboxIsDamaged(t *testing.T) {
+	requireRasterizer(t)
+
+	const path = "testdata/scanned-damaged-checkbox.pdf"
+	_, _, err := acroFormCheckboxes(path)
+	if err == nil {
+		t.Fatal("the fields read cleanly; one checkbox is meant to be unplaceable")
+	}
+	if !strings.Contains(err.Error(), `"damaged"`) {
+		t.Errorf("error %q does not name the damaged checkbox", err)
+	}
+
+	dets, _, method, err := detectPDF(context.Background(), path)
+	if err != nil {
+		t.Fatalf("detectPDF: %v", err)
+	}
+	if method != methodPixels {
+		t.Errorf("method = %q, want %q", method, methodPixels)
+	}
+	if len(dets) != 8 {
+		t.Errorf("found %d checkboxes, want 8", len(dets))
+	}
+}
+
 // oversizePDF writes a one-page PDF whose MediaBox is large enough that the
 // page exceeds maxPixels when rendered at rasterDPI, with checkboxes drawn on
 // it at the given points.

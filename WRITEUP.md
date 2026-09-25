@@ -28,9 +28,11 @@ flattened, go through OpenCV (via gocv):
 7. Deduplicate on overlap and nesting, then sort into reading order.
 
 A PDF with no form fields is rasterized by `pdftoppm` at 300 DPI first. A PDF
-whose fields pdfcpu *rejects* as invalid falls through to the same pixel path
+whose fields cannot be read in full falls through to the same pixel path
 rather than failing the request — that happens with real files, and a malformed
-text field should not cost you the checkboxes.
+text field should not cost you the checkboxes. That includes a single
+checkbox that cannot be placed on its page: answering from the fields that
+survived would drop it from a response that claims to be exact.
 
 ## Why quadrilaterals, and not square blobs of ink
 

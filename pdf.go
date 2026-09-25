@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"log/slog"
 	"math"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
@@ -69,9 +71,13 @@ func detectPDF(ctx context.Context, path string) (dets []detection, pages int, m
 		return dets, pages, methodAcroForm, nil
 	}
 
-	// A PDF that pdfcpu refuses to parse can still be perfectly renderable, so
-	// a failed field read falls through to the pixels rather than giving up on
-	// the document.
+	// A PDF whose fields cannot be read in full can still be perfectly
+	// renderable, so it falls through to the pixels rather than giving up on
+	// the document, or answering from the fields that happened to survive.
+	if formErr != nil {
+		slog.WarnContext(ctx, "pdf form fields unusable, reading pixels instead",
+			"request_id", middleware.GetReqID(ctx), "err", formErr)
+	}
 	dets, rendered, rasterErr := rasterCheckboxes(ctx, path, pages)
 	if rasterErr != nil {
 		return nil, pages, "", errors.Join(formErr, rasterErr)
@@ -83,7 +89,9 @@ func detectPDF(ctx context.Context, path string) (dets []detection, pages int, m
 }
 
 // acroFormCheckboxes reads checkbox widgets out of the PDF's form fields. It
-// returns no detections, and no error, for a PDF that has none.
+// returns no detections, and no error, for a PDF that has none, and an error
+// if any page or checkbox cannot be read: a partial answer from the fields
+// would still claim to be exact.
 func acroFormCheckboxes(path string) ([]detection, int, error) {
 	pctx, err := api.ReadContextFile(path)
 	if err != nil {
@@ -97,20 +105,31 @@ func acroFormCheckboxes(path string) ([]detection, int, error) {
 	dets := make([]detection, 0)
 	for page := 1; page <= min(pages, maxPDFPages); page++ {
 		pageDict, _, attrs, err := pctx.PageDict(page, false)
-		if err != nil || pageDict == nil {
-			continue
+		if err != nil {
+			return nil, pages, fmt.Errorf("read page %d: %w", page, err)
+		}
+		if pageDict == nil {
+			return nil, pages, fmt.Errorf("read page %d: page is missing", page)
 		}
 		annots, err := pctx.DereferenceArray(pageDict["Annots"])
-		if err != nil || len(annots) == 0 {
-			continue
+		if err != nil {
+			return nil, pages, fmt.Errorf("read page %d annotations: %w", page, err)
 		}
 
-		for _, a := range annots {
+		for i, a := range annots {
 			widget, err := pctx.DereferenceDict(a)
-			if err != nil || widget == nil {
+			if err != nil {
+				return nil, pages, fmt.Errorf("read page %d annotation %d: %w", page, i, err)
+			}
+			if widget == nil {
+				// A reference to a missing object is null, which the spec
+				// allows; nothing says it was ever a checkbox.
 				continue
 			}
-			det, ok := checkboxFromWidget(pctx, widget, attrs, page)
+			det, ok, err := checkboxFromWidget(pctx, widget, attrs, page)
+			if err != nil {
+				return nil, pages, fmt.Errorf("read page %d: %w", page, err)
+			}
 			if ok {
 				dets = append(dets, det)
 			}
@@ -120,15 +139,16 @@ func acroFormCheckboxes(path string) ([]detection, int, error) {
 }
 
 // checkboxFromWidget turns one widget annotation into a detection, if it is a
-// checkbox rather than a radio button, push button or other field type.
-func checkboxFromWidget(pctx *model.Context, widget types.Dict, attrs *model.InheritedPageAttrs, page int) (detection, bool) {
+// checkbox rather than a radio button, push button or other field type. It
+// reports an error only for a checkbox that cannot be placed on the page.
+func checkboxFromWidget(pctx *model.Context, widget types.Dict, attrs *model.InheritedPageAttrs, page int) (detection, bool, error) {
 	if sub := widget.NameEntry("Subtype"); sub == nil || *sub != "Widget" {
-		return detection{}, false
+		return detection{}, false, nil
 	}
 
 	field := fieldAttrs(pctx, widget)
 	if field.typ != "Btn" || field.flags&flagRadio != 0 || field.flags&flagPushButton != 0 {
-		return detection{}, false
+		return detection{}, false, nil
 	}
 
 	// The widget's appearance state is what is actually drawn on the page, so
@@ -140,7 +160,7 @@ func checkboxFromWidget(pctx *model.Context, widget types.Dict, attrs *model.Inh
 
 	rect, ok := rectFromArray(pctx, widget["Rect"])
 	if !ok {
-		return detection{}, false
+		return detection{}, false, fmt.Errorf("checkbox %q has no usable /Rect", field.name)
 	}
 
 	return detection{
@@ -150,7 +170,7 @@ func checkboxFromWidget(pctx *model.Context, widget types.Dict, attrs *model.Inh
 		Checked:    state != "" && state != "Off",
 		Page:       page,
 		Name:       field.name,
-	}, true
+	}, true, nil
 }
 
 // Field flags from the PDF spec, table 226: a /Btn field is a push button or a

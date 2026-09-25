@@ -121,6 +121,7 @@ Some inputs get a deliberate answer rather than an error:
 | a PDF longer than 10 pages | boxes from the first 10; `image.pages` still counts all of them |
 | a PDF page too large to render at 300 DPI | rendered smaller, with its boxes scaled back to 300 DPI coordinates |
 | a PDF with at least one checkbox form field | answered from its fields alone; no page is scanned, so checkboxes that are only printed are not reported |
+| a PDF whose form fields cannot all be read | scanned as pixels instead, and the reason logged |
 
 The full list, with the cases behind each item and what was tried, is in
 [WRITEUP.md](WRITEUP.md#known-limitations).

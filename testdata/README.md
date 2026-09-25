@@ -18,6 +18,7 @@ are copied in; see the end of this file.
 | `prose.pdf` | Real Helvetica text, a bold heading, and not one checkbox. The false-positive canary. |
 | `mixed.pdf` | The same text plus 6 checkboxes, 3 of them marked, so precision and recall are exercised together. |
 | `scanned-broken-fields.pdf` | The same page with a form field pdfcpu rejects as invalid. Exercises falling through from a failed field read to the rasterizer. |
+| `scanned-damaged-checkbox.pdf` | The same page with two checkbox fields, one of them impossible to place. pdfcpu accepts it, so it exercises falling through rather than answering from the one good field. |
 | `image1.png` | A manufactured-home appraisal page at about 150 DPI, 1120x1694, where a checkbox is 16-17px. The page that exposed the polygon tolerance being finer than the raster: a third of its boxes were rejected for fitting a pentagon. Also the clearest case of the table-rule limitation, since its marked boxes are fused to the form grid. |
 | `image2.png` | An appraisal page, 1198x1840, with 48 checkboxes of which 12 are marked. Each checkbox has a narrow ruled cell beside it, 17-19px against the boxes' 25px, and all 13 of them were reported as checkboxes. |
 | `image3.png` | Another appraisal page, 1412x816. No test of its own; further real-document input. |

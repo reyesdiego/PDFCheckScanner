@@ -122,6 +122,23 @@ objs = [
 open("testdata/scanned-broken-fields.pdf", "wb").write(build(objs, 1))
 print("scanned-broken-fields.pdf: fields unreadable, 8 boxes in the image")
 
+# ------------------------------------------ scanned page + a damaged checkbox
+# pdfcpu accepts this file, but one of its two checkbox fields has a /Rect of
+# three numbers and cannot be placed. Answering from the one good field would
+# silently drop the other, so this exercises falling through to the pixels.
+objs = [
+    (1, b"<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[6 0 R 7 0 R]>>>>"),
+    (2, b"<</Type/Pages/Kids[3 0 R]/Count 1>>"),
+    (3, b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]"
+        b"/Resources<</XObject<</Im0 5 0 R>>>>/Contents 4 0 R/Annots[6 0 R 7 0 R]>>"),
+    (4, stream("", content)),
+    (5, img),
+    (6, widget("good", "400 700 418 718", on="Yes")),
+    (7, widget("damaged", "400 660 418")),
+]
+open("testdata/scanned-damaged-checkbox.pdf", "wb").write(build(objs, 1))
+print("scanned-damaged-checkbox.pdf: one checkbox field unplaceable, 8 boxes in the image")
+
 
 # ------------------------------------------------------------- plain image
 def write_png(path, w, h, px):
