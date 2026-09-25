@@ -106,6 +106,49 @@ reported as marked boxes.
 Regenerate the figures with `make docs`; they are drawn by the detector itself
 from committed fixtures, so they cannot drift from the code.
 
+## Limitations
+
+The detector is geometry and thresholds, not a trained model, and it has only
+been checked against a handful of real pages. What it is known to get wrong:
+
+- **Skewed pages lose boxes.** Boxes are assumed roughly axis-aligned and there
+  is no deskew step, so photographed or crooked scans do poorly.
+- **Small boxes are not found.** Below about 12px a checkbox and a letter look
+  the same. Scan at 200-300 DPI; nothing warns you when an image is too coarse.
+- **Boxes touching a table rule can be missed.** The border merges into the
+  grid, and the box is found only by its empty interior, which a mark breaks
+  up. On one sample page this hides about a third of the marked boxes.
+- **Square table cells can be reported as checkboxes** when they are the same
+  size and shape.
+- **A pen stroke through a box loses it**, and so does a border broken worse
+  than the samples' own damage.
+- **Faint marks away from the centre**, such as light pencil, can read as
+  unmarked.
+- **`confidence` is a ranking, not a probability.** It separates real boxes
+  from look-alikes well, but it is not calibrated, so there is no principled
+  cutoff to filter on.
+- **Accuracy is not measured.** There are no labelled pages, so the counts
+  quoted here are regression floors checked by eye, not precision and recall.
+
+Some inputs get a deliberate answer rather than an error:
+
+| input | answer |
+| --- | --- |
+| an image that is more than 60% ink, e.g. an inverted scan | `200` with no boxes |
+| a page with no checkboxes | `200` with no boxes |
+| a PDF longer than 10 pages | boxes from the first 10; `image.pages` still counts all of them |
+| a PDF page too large to render at 300 DPI | rendered smaller, with its boxes scaled back to 300 DPI coordinates |
+| a PDF with at least one checkbox form field | answered from its fields alone; no page is scanned |
+
+The last row matters for mixed documents: once a PDF has any checkbox field, a
+checkbox that is only printed on a page, on that page or any other, is not
+reported.
+
+[WRITEUP.md](WRITEUP.md#known-limitations) has the full list with the cases
+behind each one and what was tried, and
+[docs/PIPELINE.md](docs/PIPELINE.md#what-it-still-gets-wrong) shows the main
+failures with figures.
+
 ## Setup for local development
 
 Go 1.27, plus two system dependencies:

@@ -295,11 +295,9 @@ query parameter away.
   The size check still happens after the first render rather than before, so
   `pdftoppm`'s own memory use on that first pass is bounded only by the 30s
   request timeout, and the page costs two renders.
-- **Truncation past the header.** A truncated image whose header survives
-  returns 200 with whatever decoded, because dimensions are read from the
-  header rather than by decoding twice.
 - **Operationally bare.** No authentication, no rate limiting, no metrics, no
-  tracing, single process, no container. Fine for a review, not for production.
+  tracing, a single process behind no load balancer. Fine for a review, not for
+  production.
 - **Confidence is heuristic.** It is a weighted blend of rectangularity,
   squareness and how far the interior sits from the marked/unmarked boundary.
   It ranks candidates sensibly — real boxes scored 0.98 where letter false
