@@ -7,6 +7,11 @@ reports where the checkboxes are and which ones are marked.
 POST /detect     multipart/form-data, file field "image"
 ```
 
+The code is also on GitHub at
+**https://github.com/reyesdiego/PDFCheckScanner**. That copy has the full
+commit history, renders this README and `docs/PIPELINE.md` with their
+figures, and always has the latest version; a zip is a snapshot of one commit.
+
 ## Start it
 
 Nothing to install but Docker — the image brings its own OpenCV and poppler,
