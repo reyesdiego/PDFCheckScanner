@@ -84,16 +84,14 @@ capitals like `H`, `E` and `N` have rectangular hulls — so each of the four
 sides must also carry ink along at least 80% of its length, which the top and
 bottom of an `H` do not.
 
-Both thresholds were set by sweeping them across the sample crops and the prose
-pages together. At hull 0.85 the bold-X box was still rejected on coverage
-(0.81); at hull 0.85 / coverage 0.80 it was found but the cut-border box was
-not (hull 0.80, a chamfer where its corner was severed); at **0.80 / 0.80**
-both are found. Coverage later came down again, to **0.75**, for a reason worth
-recording: the same physical checkbox scored 0.88 coverage in a crop where it
-was 33px across and 0.77 in the full page where it was 26px, because each
-missing border pixel costs 1/26 of a side instead of 1/33. The measure is
-harsher the smaller the box is rendered. Prose false positives stayed at **0**
-throughout, and the form pages went from 283 detections to 315.
+Both thresholds were swept across the sample crops and prose pages together.
+At **0.80 hull / 0.80 coverage** both failure cases are found; at 0.85 hull the
+cut-border box, whose severed corner leaves a hull of 0.80, is not. Coverage
+later came down to **0.75**, because the measure is harsher the smaller a box
+is rendered: the same checkbox scored 0.88 in a crop where it was 33px across
+and 0.77 in the full page at 26px, since each missing pixel costs 1/26 of a
+side instead of 1/33. Prose false positives stayed at **0** throughout, and
+the form pages went from 283 detections to 315.
 
 Contours also solved a recall problem for free. On real appraisal forms a
 checkbox's border often runs into the surrounding table rule, so its outline is
@@ -215,8 +213,8 @@ corners" without settling whether that pixel is included. Exclusive makes
 
 **Extra response fields, and where they live.** `page` and `name` are additive
 to the specified structure and always present, because a caller cannot
-recover either one otherwise. Everything else the service knows -
-`confidence`, `method`, the `image` block, `request_id` - describes how the
+recover either one otherwise. Everything else the service knows —
+`confidence`, `method`, the `image` block, `request_id` — describes how the
 answer was reached rather than what it is, so it is behind `?detail=true`.
 The default response is the specified structure and nothing more, which keeps
 the common case exactly what was asked for while leaving the diagnostics one
@@ -224,84 +222,55 @@ query parameter away.
 
 ## Known limitations
 
-- **Skew.** Boxes are assumed roughly axis-aligned. A photographed or crookedly
-  scanned page will start losing boxes, because a rotated square's contour
-  still fits a quad but its bounding box no longer matches it, which fails the
-  rectangularity test. There is no deskew step.
+- **Skew.** Boxes are assumed roughly axis-aligned, and there is no deskew
+  step. A rotated square still fits a quad, but its bounding box no longer
+  matches it, so it fails the rectangularity test.
 - **Small boxes.** Below about 12px a box and a letter are both blobs. Scans
-  want to be 200-300 DPI; a 72 DPI image will do poorly and the service does
-  not warn you.
-- **Dark ink on lighter paper only.** An image that is more than 60% ink is
-  skipped and returns no boxes rather than a guess. Inverted documents are not
-  handled.
-- **Square table cells.** A cell that is checkbox-sized and square is a
-  quadrilateral with an empty middle, and will be reported. None of the sample
-  documents had any, but the failure mode is real.
-- **Thresholds are scale-sensitive.** Edge coverage and the adaptive
-  threshold's window both depend on how large the box is rendered, and the
-  window additionally scales with the image's shorter edge. A form row cropped
-  out of a page is therefore not read identically to the same row inside the
-  page: one marked box was found in the crop and missed in the full image until
-  the coverage gate came down to 0.75. Normalising scale, by estimating box
-  size in a first pass and resampling, would remove a whole class of these.
-- **Size bounds mix an absolute floor with a relative cap, and that is a
-  judgement call.** A checkbox side is capped at the larger of 120px, roughly a
-  centimetre at the 300 DPI that PDFs are rasterized at, and 6% of the image's
-  shorter edge, which is what keeps a high-DPI scan readable: a 16pt box at 600
-  DPI is ~133px and a purely absolute cap threw it out, returning nothing at
-  all for a perfectly good page. It is also capped at 90% of the shorter edge
-  so a tiny crop cannot report itself as one big checkbox. The cap used to be
-  purely relative, 50% of the shorter edge, which silently broke on a single
-  form row cropped out of a page: a 1954x58 strip capped detection at 29px and
-  rejected all six of its 33px checkboxes. Neither bound alone works, so the
-  floor covers the crop and the relative part covers the resolution.
-- **Badly broken borders.** A cut border is tolerated down to a hull filling
-  80% of its bounding box and 80% coverage per side, which covers the two real
-  cases in the samples. Worse breakage still fails, and the fix for that is
-  rule removal plus a local closing rather than looser thresholds — a
-  morphological closing applied globally was measured and made things worse,
-  welding boxes to nearby rules and destroying marked-state detection
-  elsewhere (one crop went from 16 marked boxes to 0).
-- **Marks that miss the middle.** Ink in the corners is handled by the wider
-  window, but a very light pencil mark can still read as unmarked.
-- **A box with a stroke drawn through it is lost.** A pen stroke crossing a
-  form welds every box it touches into one shape: a checkbox with a handwritten
-  diagonal through it came out as part of a single 648x202 contour and was
-  rejected for being far too big. This one is structural, not a threshold:
-  erasing the stroke cuts the box's ring at the two corners the stroke passes
-  through, leaving disconnected arcs rather than a box with a notch. Five
-  approaches were measured and none worked - a morphological closing (welds
-  boxes to rules, and destroyed marked-state detection elsewhere), accepting
-  broken rings on edge coverage alone (438 false positives on prose), and
-  Hough-based stroke removal in three variants (global, unioned with the
-  untouched pass, and restricted to non-axis-aligned strokes; the last is safe
-  but recovers nothing here). What would work is assembling a rectangle from
-  the surviving side fragments, or a learned classifier over candidate regions,
-  and both are beyond threshold tuning.
+  want 200-300 DPI; a 72 DPI image does poorly, and the service does not warn.
+- **Inverted documents.** An image that is more than 60% ink returns no boxes
+  rather than a guess. White-on-black pages are not handled.
+- **Square table cells.** A checkbox-sized square cell is a quadrilateral with
+  an empty middle, and is reported. The size prior catches most; the sample
+  pages still have a few.
+- **Scale sensitivity.** Edge coverage and the threshold window both depend on
+  how large a box is rendered, so a row cropped out of a page is not read
+  exactly like the same row in the page. One marked box was found in the crop
+  and missed in the page until the coverage gate came down to 0.75. Estimating
+  box size in a first pass and resampling would remove this class of problem.
+- **Size bounds.** A side is capped at the larger of 120px (about 1cm at 300
+  DPI) and 6% of the image's shorter edge, and never more than 90% of it. Each
+  part covers a case the other breaks: a purely absolute cap rejected every
+  box on a 600 DPI scan, and a purely relative one rejected every box in a
+  1954x58 row crop.
+- **Badly broken borders.** A cut border is tolerated down to 0.80 hull fill
+  and 0.75 coverage per side, which covers the samples' real cases. Worse
+  breakage fails. A global morphological closing was tried and made things
+  worse: it welded boxes to nearby rules, and one crop went from 16 marked
+  boxes to 0.
+- **Light marks.** Ink in the corners is caught by the wider window, but a
+  very light pencil mark can still read as unmarked.
+- **A stroke through a box.** A pen stroke welds every box it crosses into one
+  large shape, which is rejected. Erasing the stroke leaves disconnected arcs,
+  not a box. Five fixes were measured and none worked: a morphological
+  closing, accepting broken rings on edge coverage alone (438 false positives
+  on prose), and three variants of Hough-based stroke removal. Assembling a
+  rectangle from the surviving fragments, or a learned classifier, would.
 - **Hand-drawn boxes.** One hand-drawn square is rejected by the confidence
-  minimum, but that is a threshold on overall quality, not a test for
-  handwriting. A neater hand-drawn box would pass, and a printed box on a poor
-  scan could fail. Telling print from handwriting properly means measuring
-  stroke-width variance and how straight each side is, which is not
-  implemented.
-- **Recall is only spot-checked.** The 121 / 40 / 50 / 72 counts are plausible
-  and the page-5 region was verified by eye, but there are no ground-truth
-  labels, so precision and recall are not actually quantified. This is the
-  biggest gap in my confidence about the numbers above.
+  minimum, but that is a quality threshold, not a handwriting test: a neater
+  hand-drawn box would pass, and a printed box on a poor scan could fail.
+- **No ground truth.** The results above are plausible and one page-5 region
+  was checked by eye, but without labelled pages precision and recall are not
+  measured. This is the biggest gap in my confidence in the numbers.
 - **Page cap.** Only the first 10 pages of a PDF are scanned, though `pages`
-  reports the true total. A page with an outsized MediaBox is rendered again at
-  a lower resolution that fits, with its boxes scaled back to the 300 DPI
-  coordinate space the other pages report in, so no page is silently dropped.
-  The size check still happens after the first render rather than before, so
-  `pdftoppm`'s own memory use on that first pass is bounded only by the 30s
-  request timeout, and the page costs two renders.
-- **Operationally bare.** No authentication, no rate limiting, no metrics, no
-  tracing, a single process behind no load balancer. Fine for a review, not for
-  production.
-- **Confidence is heuristic.** It is a weighted blend of rectangularity,
-  squareness and how far the interior sits from the marked/unmarked boundary.
-  It ranks candidates sensibly — real boxes scored 0.98 where letter false
-  positives scored 0.86-0.89 — but it is not a calibrated probability.
+  reports the true total. An outsized page is rendered again at a lower DPI,
+  with its boxes scaled back to 300 DPI coordinates; a page too big to fit even
+  at 100 DPI contributes no boxes. The size check comes after the first
+  render, so that render's memory is bounded only by the 30s timeout.
+- **Operationally bare.** No authentication, rate limiting, metrics or tracing,
+  and a single process. Fine for a review, not for production.
+- **Heuristic confidence.** A weighted blend of rectangularity, squareness and
+  how far the interior is from the marked/unmarked cutoff. It ranks well (real
+  boxes 0.98, letter false positives 0.86-0.89) but is not a probability.
 
 ## What I would do next, in order
 

@@ -1,17 +1,15 @@
 # How a checkbox is found
 
-A walkthrough of what happens to a page between arriving at `POST /detect` and
-coming back as a list of boxes. Every figure here is generated from a
-committed fixture by the detector itself:
+What happens to a page between arriving at `POST /detect` and coming back as
+a list of boxes. Every figure is drawn by the detector itself from a committed
+fixture, so none of it can drift from the code:
 
 ```sh
 make docs      # go test -tags docs -run TestGenerateDocImages ./...
 ```
 
-so none of it can drift away from what the code actually does. The
-before-and-after pairs in the second half are made by switching one gate off
-through its `Detector` field, which is why every threshold in the detector is
-a field rather than a constant.
+The before-and-after pairs in the second half switch one gate off through its
+`Detector` field, which is why every threshold is a field, not a constant.
 
 ## Two paths, and why the interesting one is the hard one
 
@@ -128,7 +126,7 @@ page exposed, and the sequence is the interesting part of the work.
 ### A perfect square that fitted a pentagon
 
 ![Before and after: the corner tolerance](img/10-pentagon-before.png)
-![](img/10-pentagon-after.png)
+![After: the same boxes found](img/10-pentagon-after.png)
 
 A page scanned at about 150 DPI reported 39 of its ~118 boxes. The ones it
 dropped measured squareness 1.00, rectangularity 0.87 and edge coverage 1.00 —
@@ -151,7 +149,7 @@ unchanged at zero.
 ### Ruled cells that look exactly like checkboxes
 
 ![Before and after: the size prior](img/12-cells-before.png)
-![](img/12-cells-after.png)
+![After: only the checkboxes remain](img/12-cells-after.png)
 
 A ruled table cell is a rectangle with a complete border and a clean interior.
 By shape there is nothing to tell it from a checkbox, and on this page a narrow
@@ -178,7 +176,7 @@ was also wide enough to keep the cells.
 ### Letters that are not on paper
 
 ![Before and after: the paper check](img/11-banner-before.png)
-![](img/11-banner-after.png)
+![After: the banner letters are gone](img/11-banner-after.png)
 
 An appraisal form labels its sections with a word set vertically down the
 margin, white letters knocked out of a solid black band. The counters of `E`
