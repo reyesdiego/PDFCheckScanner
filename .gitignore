@@ -2,10 +2,8 @@
 /homevision
 .DS_Store
 
-# GoLand project files: the run configurations are shared deliberately, the
-# rest is per-machine state.
-/.idea/*
-!/.idea/runConfigurations/
+# GoLand project files are per-machine state.
+/.idea/
 
 # Sample appraisal documents that came with the challenge: someone else's
 # paperwork, kept out of the repository.
