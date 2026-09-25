@@ -14,11 +14,16 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 )
 
+// uploadFile reads a fixture, failing the test before any use of the content
+// if the file is missing or empty.
 func uploadFile(t *testing.T, path string) []byte {
 	t.Helper()
 	content, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read fixture %s: %v", path, err)
+	}
+	if len(content) == 0 {
+		t.Fatalf("fixture %s is empty", path)
 	}
 	return content
 }

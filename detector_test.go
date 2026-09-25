@@ -27,15 +27,25 @@ func ink(img *image.Gray, x, y int) {
 	}
 }
 
-// drawBox draws a hollow square with the given stroke thickness.
+// drawBox draws a hollow square with the given stroke thickness, as four
+// filled bands that do not overlap, so every border pixel is written once.
 func drawBox(img *image.Gray, x, y, side, stroke int) {
-	for t := range stroke {
-		for i := range side {
-			ink(img, x+i, y+t)
-			ink(img, x+i, y+side-1-t)
-			ink(img, x+t, y+i)
-			ink(img, x+side-1-t, y+i)
-		}
+	for _, band := range []image.Rectangle{
+		image.Rect(x, y, x+side, y+stroke),                         // top
+		image.Rect(x, y+side-stroke, x+side, y+side),               // bottom
+		image.Rect(x, y+stroke, x+stroke, y+side-stroke),           // left
+		image.Rect(x+side-stroke, y+stroke, x+side, y+side-stroke), // right
+	} {
+		fillInk(img, band)
+	}
+}
+
+// fillInk inks every pixel of r that lies inside img, a row at a time.
+func fillInk(img *image.Gray, r image.Rectangle) {
+	r = r.Intersect(img.Bounds())
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		row := img.PixOffset(r.Min.X, y)
+		clear(img.Pix[row : row+r.Dx()])
 	}
 }
 
