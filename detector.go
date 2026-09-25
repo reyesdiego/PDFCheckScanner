@@ -642,6 +642,7 @@ func surroundingInk(ink gocv.Mat, r image.Rectangle) float64 {
 	return float64(gocv.CountNonZero(out)-gocv.CountNonZero(in)) / float64(area)
 }
 
+// inkFraction is the share of ink pixels in a binary mask, 0 for an empty one.
 func inkFraction(ink gocv.Mat) float64 {
 	total := ink.Cols() * ink.Rows()
 	if total == 0 {
@@ -753,6 +754,8 @@ func dedupe(dets []detection) []detection {
 	return kept
 }
 
+// iou is the intersection over union of two boxes: 1 for identical boxes, 0
+// for boxes that do not overlap.
 func iou(a, b box) float64 {
 	x0, y0 := max(a.X, b.X), max(a.Y, b.Y)
 	x1, y1 := min(a.X+a.Width, b.X+b.Width), min(a.Y+a.Height, b.Y+b.Height)
@@ -767,7 +770,6 @@ func iou(a, b box) float64 {
 	return float64(inter) / float64(union)
 }
 
-// nests reports whether either box sits entirely within the other.
 // nests reports whether one of the boxes is the other's outline or interior
 // hole: the same box found twice, once from each side of its border.
 //

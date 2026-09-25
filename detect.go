@@ -30,14 +30,15 @@ const (
 
 	// maxUploadBytes caps the whole request body; maxMemoryBytes is how much of
 	// it multipart parsing keeps in RAM before spilling to a temp file.
-	maxUploadBytes = 10 << 20
-	maxMemoryBytes = 4 << 20
+	maxUploadBytes = 10 << 20 // 10 MiB
+	maxMemoryBytes = 4 << 20  // 4 MiB
 
 	// sniffBytes is what http.DetectContentType needs to identify a format.
 	sniffBytes = 512
 
 	// maxPixels caps the decoded image, which bounds both the memory a decode
-	// allocates and the time detection spends scanning it.
+	// allocates and the time detection spends scanning it. 24M pixels is a
+	// 6000x4000 image, about 96 MB once decoded to RGBA.
 	maxPixels = 24_000_000
 
 	pdfType = "application/pdf"
@@ -178,6 +179,10 @@ func (b *box) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// handleDetect serves POST /detect: it takes one image or PDF from the image
+// form field and responds with the checkboxes found in it. Each way an upload
+// can be rejected maps to its own status code, so clients can tell a file that
+// is too big from one that is the wrong type or is corrupt.
 func handleDetect(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
 
@@ -335,6 +340,7 @@ func imageHeader(file io.ReadSeeker, contentType string) (image.Config, error) {
 	return cfg, nil
 }
 
+// sortedTypes lists allowedTypes in a stable order for error messages.
 func sortedTypes() []string {
 	types := make([]string, 0, len(allowedTypes))
 	for t := range allowedTypes {
@@ -350,6 +356,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+// writeError sends msg as a JSON {"error": msg} body.
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }

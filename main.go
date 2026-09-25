@@ -28,6 +28,8 @@ func main() {
 	}
 }
 
+// run serves on addr until the server fails or ctx is cancelled or the process
+// is interrupted, then gives in-flight requests 10s to finish.
 func run(ctx context.Context, addr string, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -68,6 +70,9 @@ func run(ctx context.Context, addr string, logger *slog.Logger) error {
 // every request.
 var detector = NewDetector()
 
+// newRouter wires the middleware and the one route the service exposes. The
+// 30s timeout bounds each request, including the PDF rasterization it can
+// trigger.
 func newRouter() *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(

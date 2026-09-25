@@ -210,6 +210,8 @@ func fieldAttrs(pctx *model.Context, widget types.Dict) fieldInfo {
 	return info
 }
 
+// rectFromArray reads a PDF /Rect array into a normalised rectangle, reporting
+// false if it is not four numbers.
 func rectFromArray(pctx *model.Context, o types.Object) (*types.Rectangle, bool) {
 	arr, err := pctx.DereferenceArray(o)
 	if err != nil || len(arr) != 4 {
@@ -416,6 +418,7 @@ func renderPageToFit(ctx context.Context, pdfPath, dir string, page int, cfg ima
 	return files[0], float64(rasterDPI) / float64(dpi), nil
 }
 
+// pageConfig reads the dimensions of a rendered page without decoding it.
 func pageConfig(file string) (image.Config, error) {
 	f, err := os.Open(file)
 	if err != nil {
@@ -454,6 +457,8 @@ func detectPageImage(file string, page int, scale float64) ([]detection, error) 
 	return dets, nil
 }
 
+// scaleBox multiplies every coordinate of b by scale, rounding to the nearest
+// pixel.
 func scaleBox(b box, scale float64) box {
 	at := func(n int) int { return int(math.Round(float64(n) * scale)) }
 	return box{X: at(b.X), Y: at(b.Y), Width: at(b.Width), Height: at(b.Height)}
