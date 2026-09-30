@@ -22,7 +22,8 @@ What makes it more than a demo:
 - **Strict at the edge.** File types are checked from the bytes, sizes and
   pixel counts are capped, and a rejected upload gets a JSON error whose
   status code says what kind of problem it was.
-- **One command to run:** `docker compose up --build`.
+- **One command to run:** `docker compose up --build`, then open
+  **http://localhost:8080** to upload a file and see the boxes drawn on it.
 
 Where to read next:
 
@@ -45,7 +46,14 @@ Only Docker is needed; the image brings its own OpenCV and poppler.
 docker compose up --build        # serves on http://localhost:8080; Ctrl-C stops it
 ```
 
-Then, from the repo root in another shell:
+**In a browser,** open http://localhost:8080, then pick or drop a file. An
+image comes back with every checkbox outlined, green for marked and red for
+empty, above a table of the boxes; hovering a box highlights its row. A PDF's
+boxes are listed by page, since the page does not draw PDFs.
+
+![The upload page showing a form with its checkboxes outlined](docs/img/20-upload-page.png)
+
+**From the shell,** in another terminal at the repo root:
 
 ```sh
 curl -X POST localhost:8080/detect -F "image=@testdata/form.png"
@@ -255,8 +263,8 @@ Content-Type: application/json
 A 500 is the server's fault. Its cause goes to the server log with the
 request ID, never to the client. Branch on the status code; the
 messages are for people and may change. The
-router's own 405 (a method other than `POST`) and 404 (any other path) have no
-JSON body.
+router's own 405 (a method `/detect` does not take) and 404 (a path that is
+neither `/detect` nor the upload page) have no JSON body.
 
 ## Trying it out
 
@@ -333,6 +341,7 @@ For changes, see [CONTRIBUTING.md](CONTRIBUTING.md). In short: branch from
 | file | |
 | --- | --- |
 | `main.go` | chi router, middleware, flags, graceful shutdown |
+| `ui.go`, `ui/` | the upload page at `/`, embedded in the binary |
 | `detect.go` | the endpoint: multipart handling, sniffing, limits, response shape |
 | `detector.go` | the image detector (OpenCV via gocv) |
 | `pdf.go` | PDF handling: AcroForm fast path, pdftoppm fallback, page geometry |

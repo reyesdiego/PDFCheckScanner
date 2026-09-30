@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Checkbox detection</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Checkbox detection</h1>
+    <p>Upload a scanned form or a PDF to see where its checkboxes are and which ones are marked.</p>
+  </header>
+
+  <main>
+    <label class="drop" id="drop">
+      <input type="file" id="file" accept="image/png,image/jpeg,image/webp,image/gif,application/pdf">
+      <span class="drop-title">Choose a file, or drop it here</span>
+      <span class="drop-hint">PNG, JPEG, WebP, GIF or PDF, up to 10 MiB</span>
+    </label>
+
+    <p id="status" role="status" aria-live="polite"></p>
+
+    <section id="result" hidden>
+      <dl class="summary">
+        <div><dt>File</dt><dd id="sum-file"></dd></div>
+        <div><dt>Checkboxes</dt><dd id="sum-boxes"></dd></div>
+        <div><dt>Marked</dt><dd id="sum-checked"></dd></div>
+        <div><dt>Read from</dt><dd id="sum-method"></dd></div>
+      </dl>
+
+      <p id="note" class="note" hidden></p>
+
+      <figure id="figure" hidden>
+        <div class="toolbar">
+          <span class="legend"><i class="swatch checked"></i>Marked</span>
+          <span class="legend"><i class="swatch empty"></i>Empty</span>
+          <label class="toggle"><input type="checkbox" id="show-empty" checked> Show empty boxes</label>
+        </div>
+        <canvas id="canvas" aria-label="The uploaded image with each detected checkbox outlined"></canvas>
+      </figure>
+
+      <table id="boxes">
+        <caption>Detected checkboxes, in reading order</caption>
+        <thead>
+          <tr>
+            <th scope="col">#</th>
+            <th scope="col" class="col-page">Page</th>
+            <th scope="col">State</th>
+            <th scope="col">Position (x1, y1 &ndash; x2, y2)</th>
+            <th scope="col">Size</th>
+            <th scope="col">Confidence</th>
+            <th scope="col" class="col-name">Field</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+</body>
+</html>

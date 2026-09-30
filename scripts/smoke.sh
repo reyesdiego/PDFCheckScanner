@@ -145,5 +145,15 @@ check "GET is not routed -> 405" \
 	"405" \
 	"$(status GET /detect)"
 
+echo "== the upload page"
+
+check "GET / serves the upload page" \
+	"200" \
+	"$(status GET /)"
+
+check "the page's script is served" \
+	"200" \
+	"$(status GET /app.js)"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -610,19 +610,25 @@ func TestDetectEndpointRejectsCorruptPDF(t *testing.T) {
 	errorMessage(t, rec)
 }
 
-func TestOnlyDetectIsRouted(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/detect", nil)
-	rec := httptest.NewRecorder()
-	newRouter().ServeHTTP(rec, req)
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("GET /detect: status = %d, want 405", rec.Code)
-	}
-
-	req = httptest.NewRequest(http.MethodGet, "/", nil)
-	rec = httptest.NewRecorder()
-	newRouter().ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("GET /: status = %d, want 404", rec.Code)
+// Only /detect and the upload page are routed. The compose healthcheck relies
+// on GET /detect being a 405.
+func TestOnlyDetectAndTheUploadPageAreRouted(t *testing.T) {
+	for _, tc := range []struct {
+		method, path string
+		want         int
+	}{
+		{http.MethodGet, "/detect", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/", http.StatusOK},
+		{http.MethodPost, "/", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/index.html", http.StatusNotFound},
+		{http.MethodGet, "/ui/app.js", http.StatusNotFound},
+		{http.MethodGet, "/nope", http.StatusNotFound},
+	} {
+		rec := httptest.NewRecorder()
+		newRouter().ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+		if rec.Code != tc.want {
+			t.Errorf("%s %s: status = %d, want %d", tc.method, tc.path, rec.Code, tc.want)
+		}
 	}
 }
 

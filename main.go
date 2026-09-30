@@ -139,9 +139,9 @@ func run(ctx context.Context, addr string, logger *slog.Logger) error {
 // every request.
 var detector = NewDetector()
 
-// newRouter wires the middleware and the one route the service exposes. The
-// 30s timeout bounds each request, including the PDF rasterization it can
-// trigger.
+// newRouter wires the middleware, the detection endpoint and the upload page
+// that calls it. The 30s timeout bounds each request, including the PDF
+// rasterization it can trigger.
 func newRouter() *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(
@@ -152,5 +152,10 @@ func newRouter() *chi.Mux {
 		middleware.Timeout(30*time.Second),
 	)
 	r.Post("/detect", handleDetect)
+
+	r.Get("/", serveUI("index.html", "text/html; charset=utf-8"))
+	r.Get("/app.js", serveUI("app.js", "text/javascript; charset=utf-8"))
+	r.Get("/style.css", serveUI("style.css", "text/css; charset=utf-8"))
+	r.Get("/favicon.svg", serveUI("favicon.svg", "image/svg+xml"))
 	return r
 }
