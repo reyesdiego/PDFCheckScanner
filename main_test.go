@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -30,10 +31,51 @@ func freeAddr(t *testing.T) string {
 }
 
 // runInBackground starts run and returns a channel that gets its result.
-func runInBackground(ctx context.Context, addr string) <-chan error {
+//
+// run is the only thing that sends on done, and it sends once, so there is
+// nothing to race. The buffer is what lets the goroutine exit even when the
+// test has stopped listening, and the cleanup cancels run however the test
+// ends, so a failed test cannot leave a server running into the next one.
+func runInBackground(t *testing.T, ctx context.Context, addr string) <-chan error {
+	t.Helper()
+	ctx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
+
 	done := make(chan error, 1)
 	go func() { done <- run(ctx, addr, quietLogger) }()
 	return done
+}
+
+// waitUntilServing polls addr until the router answers. GET is not routed, so
+// a 405 is the proof.
+func waitUntilServing(t *testing.T, addr string) {
+	t.Helper()
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp, err := client.Get("http://" + addr + "/detect")
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusMethodNotAllowed {
+				t.Fatalf("GET /detect = %d, want 405", resp.StatusCode)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("server never answered: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// requirePortReleased fails if something still listens on addr.
+func requirePortReleased(t *testing.T, addr string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("port still held after run returned: %v", err)
+	}
+	ln.Close()
 }
 
 func waitFor(t *testing.T, done <-chan error, within time.Duration) error {
@@ -78,7 +120,7 @@ func TestRunFailsFastWhenThePortIsTaken(t *testing.T) {
 	defer taken.Close()
 	baseline := goroutineBaseline()
 
-	err = waitFor(t, runInBackground(context.Background(), taken.Addr().String()), 5*time.Second)
+	err = waitFor(t, runInBackground(t, context.Background(), taken.Addr().String()), 5*time.Second)
 	if err == nil || !strings.Contains(err.Error(), "listen") {
 		t.Fatalf("err = %v, want a listen error", err)
 	}
@@ -91,25 +133,8 @@ func TestRunStopsCleanlyWhenCancelled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := runInBackground(ctx, addr)
-
-	// Serving means answering: GET is not routed, so a 405 is the proof.
-	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		resp, err := client.Get("http://" + addr + "/detect")
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode != http.StatusMethodNotAllowed {
-				t.Fatalf("GET /detect = %d, want 405", resp.StatusCode)
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("server never answered: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	done := runInBackground(t, ctx, addr)
+	waitUntilServing(t, addr)
 
 	cancel()
 	if err := waitFor(t, done, 15*time.Second); err != nil {
@@ -117,11 +142,43 @@ func TestRunStopsCleanlyWhenCancelled(t *testing.T) {
 	}
 
 	// The port is released and nothing run started is left behind.
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		t.Fatalf("port still held after run returned: %v", err)
+	requirePortReleased(t, addr)
+	requireGoroutinesBackTo(t, baseline)
+}
+
+// Several shutdown requests at once, as when signals arrive in a burst while
+// run is already stopping, must stop the server exactly once and cleanly.
+// Run with -race, as make check does, this is what would catch a data race
+// between them.
+func TestRunStopsOnceUnderConcurrentCancellation(t *testing.T) {
+	addr := freeAddr(t)
+	baseline := goroutineBaseline()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runInBackground(t, ctx, addr)
+	waitUntilServing(t, addr)
+
+	start := make(chan struct{})
+	var cancellers sync.WaitGroup
+	for range 16 {
+		cancellers.Go(func() {
+			<-start
+			cancel()
+		})
 	}
-	ln.Close()
+	close(start)
+	cancellers.Wait()
+
+	if err := waitFor(t, done, 15*time.Second); err != nil {
+		t.Fatalf("run = %v, want nil after a clean shutdown", err)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("run reported a second result: %v", err)
+	default:
+	}
+	requirePortReleased(t, addr)
 	requireGoroutinesBackTo(t, baseline)
 }
 
