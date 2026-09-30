@@ -18,7 +18,9 @@ flattened, go through OpenCV (via gocv):
 
 1. Flatten onto white and convert to grayscale, so a transparent PNG reads as
    paper rather than as solid ink.
-2. Binarize: Gaussian adaptive threshold, OR-ed with an absolute dark floor.
+2. Binarize: Gaussian adaptive threshold with an offset sized to the page's
+   noise, OR-ed with an absolute dark floor. A global Otsu mask is kept as a
+   second opinion on box borders.
 3. `findContours` with `RetrievalList`, so holes come back alongside outlines.
 4. Fit `approxPolyDP` to each contour's **convex hull**. Keep the
    four-cornered ones.
@@ -129,22 +131,42 @@ is to report nothing rather than to guess.
 
 ## Binarization
 
-Global thresholding does not work on documents. Otsu's method picks the split
-that maximizes between-class variance, and on a page where ink covers under 1%
-of the pixels, the best such split cuts the *paper noise* in half rather than
-separating ink from paper — 169.0 against 153.4 on a page I measured. Half the
-page becomes "ink" and the checkboxes drown.
+A global threshold cannot be the main binarization. Otsu's method picks the
+split that maximizes between-class variance, and on a page where ink covers
+under 1% of the pixels, the best such split cuts the *paper noise* in half
+rather than separating ink from paper — 169.0 against 153.4 on a page I
+measured. Half the page becomes "ink" and the checkboxes drown.
 
-Local thresholding fixes that, with two adjustments found by measurement:
+Local thresholding fixes that, with three adjustments found by measurement:
 
-- **A generous offset (30), and no pre-blur.** OpenCV's adaptive threshold at a
-  small offset marked **37% of noisy paper as ink**, because paper grain alone
-  clears the local mean. Blurring first also fixes it, but it widens every
-  stroke and inflates every reported box by a pixel on each side, so the offset
-  does the work instead.
+- **An offset sized to the page's noise, and no pre-blur.** OpenCV's adaptive
+  threshold at a small offset marked **37% of noisy paper as ink**, because
+  paper grain alone clears the local mean. Blurring first also fixes it, but
+  it widens every stroke and inflates every reported box by a pixel on each
+  side, so the offset does the work instead. It started as a fixed 30, which
+  broke a soft, low-contrast scan: 30 grey levels was more than the contrast
+  between a grey box border and the paper, the borders came out dashed, and a
+  row of nine checkboxes reported none. The offset is now **2.5x the measured
+  noise**, the mean absolute difference between the page and a blurred copy of
+  itself, bounded to 10-30. Grainy scans measure 10-18 levels and keep the
+  full 30; soft ones measure about 4 and get an offset they can clear.
+- **A stricter mask for judging marks.** At a soft offset the blurred fringe of
+  a border becomes ink, and on a box near `MinSide` it fills the interior and
+  the box reads as marked. So shapes come from the noise-sized offset, and the
+  ink inside a box is always counted at the full 30. On a grainy page the two
+  masks are the same.
 - **An absolute dark floor (90), OR-ed in.** Adaptive thresholding hollows out
   large solid areas, since the middle of a filled blob has no local contrast. A
   filled mark would become a ring, and then a bogus empty checkbox.
+
+Otsu is still kept, as a second opinion on borders only. Local thresholding
+judges a pixel against its neighbours, so a heavy X inside a box costs the
+thin border beside it its contrast: one marked box scored **0.59 edge
+coverage** where the empty box next to it scored 0.97. When a candidate fails
+the edge-coverage gate on the adaptive mask, the same test is run on a
+globally thresholded one, which is blind to uneven lighting but indifferent
+to what sits next to what — the opposite weakness. It never finds shapes or
+judges marks, so the sparse-page failure above does not come back.
 
 ## Marked or unmarked
 

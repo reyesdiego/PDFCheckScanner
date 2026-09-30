@@ -31,6 +31,7 @@ Where to read next:
 | --- | --- |
 | [Start it](#start-it), [Using it](#using-it) | run the service and call it |
 | [Limitations](#limitations) | what it gets wrong, and edge cases |
+| [docs/APPROACH.md](docs/APPROACH.md) | the whole approach in one place: why OpenCV, every stage, every edge case |
 | [docs/PIPELINE.md](docs/PIPELINE.md) | how a checkbox is found, with figures |
 | [WRITEUP.md](WRITEUP.md) | design decisions, tradeoffs, next steps |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | reporting a problem, making a change |
