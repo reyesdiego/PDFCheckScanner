@@ -225,6 +225,10 @@ func handleDetect(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnsupportedMediaType, "could not decode the uploaded image")
 		return
 	}
+	if err := withinHeader(img, cfg); err != nil {
+		writeError(w, http.StatusUnsupportedMediaType, err.Error())
+		return
+	}
 
 	boxes, err := detector.Detect(img)
 	if err != nil {
@@ -396,10 +400,29 @@ func imageHeader(file io.ReadSeeker, contentType string) (image.Config, error) {
 	if err != nil {
 		return cfg, fmt.Errorf("malformed or truncated %s image", contentType)
 	}
+	// PNG rejects a zero dimension itself, but GIF does not: a logical screen
+	// of 0x0 reads as a valid header, and would pass the pixel cap trivially.
+	if cfg.Width <= 0 || cfg.Height <= 0 {
+		return cfg, fmt.Errorf("%s image header declares no pixels (%dx%d)",
+			contentType, cfg.Width, cfg.Height)
+	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return cfg, errors.New("could not read the upload")
 	}
 	return cfg, nil
+}
+
+// withinHeader reports an error if img is bigger than the header it was
+// decoded from declared. The pixel cap is checked against the header, before
+// decoding, so it only holds if the two agree. The standard decoders refuse a
+// frame that overflows its declared size, but that is their rule rather than
+// this service's, and the cap should not rest on it.
+func withinHeader(img image.Image, cfg image.Config) error {
+	if b := img.Bounds(); b.Dx() > cfg.Width || b.Dy() > cfg.Height {
+		return fmt.Errorf("image decodes to %dx%d, larger than the %dx%d its header declares",
+			b.Dx(), b.Dy(), cfg.Width, cfg.Height)
+	}
+	return nil
 }
 
 // sortedTypes lists allowedTypes in a stable order for error messages.

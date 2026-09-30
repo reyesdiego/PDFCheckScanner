@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -180,6 +182,134 @@ func TestRunStopsOnceUnderConcurrentCancellation(t *testing.T) {
 	}
 	requirePortReleased(t, addr)
 	requireGoroutinesBackTo(t, baseline)
+}
+
+// startServe runs serve on ln with h, and returns a channel that gets serve's
+// result.
+func startServe(t *testing.T, ctx context.Context, ln net.Listener, h http.Handler, grace, drain time.Duration) <-chan error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, ln, h, quietLogger, grace, drain) }()
+	return done
+}
+
+// sendInBackground makes one request to addr and ignores the outcome: the
+// tests below cut its connection on purpose.
+func sendInBackground(addr string) {
+	go func() {
+		client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+		if resp, err := client.Get("http://" + addr + "/"); err == nil {
+			resp.Body.Close()
+		}
+	}()
+}
+
+// slowToLetGo is a handler that runs until its request is cancelled and then
+// takes a while to finish, as a detection holding OpenCV memory does. It
+// closes started when it begins and sets finished when it returns.
+func slowToLetGo(started chan<- struct{}, finished *atomic.Bool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+		time.Sleep(200 * time.Millisecond)
+		finished.Store(true)
+	})
+}
+
+func loopbackListener(t *testing.T) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ln
+}
+
+// A request that outlives the grace period has its connection cut, and serve
+// must not return while its handler is still running: whatever the handler
+// holds would otherwise outlive the server.
+func TestServeWaitsForHandlersItCutsOff(t *testing.T) {
+	ln := loopbackListener(t)
+	started := make(chan struct{})
+	var finished atomic.Bool
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := startServe(t, ctx, ln, slowToLetGo(started, &finished), 50*time.Millisecond, 5*time.Second)
+	sendInBackground(ln.Addr().String())
+	<-started
+
+	cancel()
+	err := waitFor(t, done, 10*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "shutdown") {
+		t.Fatalf("serve = %v, want a shutdown error for the request it cut off", err)
+	}
+	if !finished.Load() {
+		t.Fatal("serve returned while a handler it cut off was still running")
+	}
+}
+
+// A handler that ignores its cancelled context must not hold the process
+// open: serve gives up on it after the drain period and says so.
+func TestServeGivesUpOnHandlersThatNeverReturn(t *testing.T) {
+	ln := loopbackListener(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	stuck := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := startServe(t, ctx, ln, stuck, 50*time.Millisecond, 100*time.Millisecond)
+	sendInBackground(ln.Addr().String())
+	<-started
+
+	cancel()
+	err := waitFor(t, done, 5*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "1 requests still running") {
+		t.Fatalf("serve = %v, want it to report the stuck request", err)
+	}
+}
+
+// failingListener hands out one connection and then fails for good once
+// broken is closed, the way a listener does when its socket goes away.
+type failingListener struct {
+	net.Listener
+	broken   chan struct{}
+	accepted atomic.Bool
+}
+
+func (l *failingListener) Accept() (net.Conn, error) {
+	if l.accepted.CompareAndSwap(false, true) {
+		return l.Listener.Accept()
+	}
+	<-l.broken
+	return nil, errors.New("listener broke")
+}
+
+// When Serve itself fails, the connections it had already accepted must be
+// closed and their handlers waited for, not left running after serve returns.
+func TestServeClosesConnectionsWhenServingFails(t *testing.T) {
+	ln := &failingListener{Listener: loopbackListener(t), broken: make(chan struct{})}
+	defer ln.Listener.Close()
+	started := make(chan struct{})
+	var finished atomic.Bool
+
+	done := startServe(t, context.Background(), ln, slowToLetGo(started, &finished), time.Second, 5*time.Second)
+	sendInBackground(ln.Addr().String())
+	<-started
+
+	close(ln.broken)
+	err := waitFor(t, done, 10*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "listener broke") {
+		t.Fatalf("serve = %v, want the listener's error", err)
+	}
+	if !finished.Load() {
+		t.Fatal("serve returned while a handler was still running")
+	}
 }
 
 // main relies on this to shut down: a container stop is a SIGTERM, Ctrl-C is

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"image"
 	"image/color"
@@ -721,6 +722,73 @@ func TestDetectAcceptsGIFUpload(t *testing.T) {
 	}
 	if len(got.Boxes) != 1 {
 		t.Errorf("got %d boxes, want 1", len(got.Boxes))
+	}
+}
+
+// gifWithScreen encodes a GIF whose frame is frameSide square and whose
+// header's logical screen claims screenW x screenH.
+func gifWithScreen(t *testing.T, frameSide, screenW, screenH int) []byte {
+	t.Helper()
+	var content bytes.Buffer
+	frame := image.NewPaletted(image.Rect(0, 0, frameSide, frameSide), color.Palette{color.White, color.Black})
+	if err := gif.Encode(&content, frame, nil); err != nil {
+		t.Fatal(err)
+	}
+	raw := content.Bytes()
+	// The logical screen size follows the 6-byte signature, little-endian.
+	binary.LittleEndian.PutUint16(raw[6:], uint16(screenW))
+	binary.LittleEndian.PutUint16(raw[8:], uint16(screenH))
+	return raw
+}
+
+// The pixel cap is checked against the header, so a header that lies about
+// the size must not get an image past it. A 0x0 GIF header is well-formed as
+// far as the GIF decoder is concerned, and one smaller than its own frame
+// would pass the cap with room to spare.
+func TestDetectRejectsImpossibleImageDimensions(t *testing.T) {
+	cases := []struct {
+		name    string
+		content []byte
+		want    string
+	}{
+		{"zero-size header", gifWithScreen(t, 40, 0, 0), "declares no pixels"},
+		{"zero width", gifWithScreen(t, 40, 0, 40), "declares no pixels"},
+		{"header smaller than frame", gifWithScreen(t, 2000, 10, 10), "could not decode"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := upload(t, imageField, "lying.gif", tc.content)
+			if rec.Code != http.StatusUnsupportedMediaType {
+				t.Fatalf("status = %d, want 415 (body %s)", rec.Code, rec.Body)
+			}
+			if msg := errorMessage(t, rec); !strings.Contains(msg, tc.want) {
+				t.Errorf("error = %q, want it to mention %q", msg, tc.want)
+			}
+		})
+	}
+}
+
+// Whatever a decoder allows, an image bigger than its header is refused, so
+// the pixel cap cannot be dodged by a decoder that is laxer than today's.
+func TestWithinHeader(t *testing.T) {
+	cfg := image.Config{Width: 100, Height: 50}
+	cases := []struct {
+		name   string
+		bounds image.Rectangle
+		ok     bool
+	}{
+		{"same size", image.Rect(0, 0, 100, 50), true},
+		{"smaller, as a GIF frame may be", image.Rect(10, 10, 60, 40), true},
+		{"too wide", image.Rect(0, 0, 101, 50), false},
+		{"too tall", image.Rect(0, 0, 100, 5000), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := withinHeader(image.NewGray(tc.bounds), cfg)
+			if (err == nil) != tc.ok {
+				t.Errorf("withinHeader(%v) = %v, want ok=%v", tc.bounds, err, tc.ok)
+			}
+		})
 	}
 }
 

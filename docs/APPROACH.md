@@ -531,6 +531,7 @@ These aren't about detection, but they decide what the detector receives:
 | file > 10 MiB | `413` |
 | image > 24 MP (configurable with `-max-pixels` / `MAX_PIXELS`) | `413`, checked from the header **before** decoding |
 | malformed image, or a decoder panic | `415`; panics are recovered in `decodeSafely` |
+| header claims 0×0, or less than the image really holds | `415`, so a lying header can't get past the pixel limit |
 | more than one `image` file | `400`, instead of silently using the first one |
 | transparent PNG | flattened onto white |
 | mostly-ink or inverted image | `200` with no boxes |

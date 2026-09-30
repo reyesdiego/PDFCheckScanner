@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -79,17 +80,19 @@ func shutdownOnSignal(parent context.Context) (context.Context, context.CancelFu
 	return ctx, stop
 }
 
-// run serves on addr until the server fails or ctx is cancelled, then gives
-// in-flight requests 10s to finish. It returns only once the server has fully
-// stopped, so nothing it started outlives it.
-func run(ctx context.Context, addr string, logger *slog.Logger) error {
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           newRouter(),
-		ReadHeaderTimeout: 5 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
+// Shutdown timeouts. In-flight requests get shutdownGrace to finish on their
+// own. Past that their connections are cut, which cancels their contexts, and
+// they get drainGrace more to notice and return.
+const (
+	shutdownGrace = 10 * time.Second
+	drainGrace    = 5 * time.Second
+)
 
+// run serves on addr until the server fails or ctx is cancelled, then shuts
+// down within shutdownGrace plus drainGrace. It returns only once the server
+// has stopped and its handlers have returned, so nothing it started outlives
+// it.
+func run(ctx context.Context, addr string, logger *slog.Logger) error {
 	// PDFs without form fields need an external rasterizer; say so at boot
 	// rather than only when the first scanned PDF arrives.
 	if _, err := exec.LookPath(rasterizer); err != nil {
@@ -106,26 +109,50 @@ func run(ctx context.Context, addr string, logger *slog.Logger) error {
 	}
 	logger.Info("listening", "addr", ln.Addr().String())
 
+	return serve(ctx, ln, newRouter(), logger, shutdownGrace, drainGrace)
+}
+
+// serve runs h on ln until the server fails or ctx is cancelled. It takes the
+// timeouts as arguments so tests can use short ones.
+func serve(ctx context.Context, ln net.Listener, h http.Handler, logger *slog.Logger, grace, drain time.Duration) error {
+	// Server.Close cuts connections but does not wait for the handlers
+	// serving them, and a handler mid-detection holds OpenCV Mats, which are
+	// C memory the garbage collector cannot see. Counting them is what lets
+	// serve wait for them to let go.
+	var handlers inFlight
+	srv := &http.Server{
+		Handler:           handlers.track(h),
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
 
 	select {
 	case err := <-serveErr:
-		// Serve closes the listener itself when it fails.
-		return fmt.Errorf("serve: %w", err)
+		// Serve closes the listener itself when it fails, but not the
+		// connections it already accepted, whose handlers would carry on
+		// after serve returned.
+		srv.Close()
+		return errors.Join(fmt.Errorf("serve: %w", err), handlers.wait(drain))
 	case <-ctx.Done():
 	}
 
 	logger.Info("shutting down")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), grace)
 	defer cancel()
 	shutdownErr := srv.Shutdown(shutdownCtx)
 	if shutdownErr != nil {
-		// Requests outlived the grace period; cut their connections.
+		// Requests outlived the grace period; cut their connections, which
+		// cancels their contexts, and give them a moment to return.
 		srv.Close()
+		if err := handlers.wait(drain); err != nil {
+			shutdownErr = errors.Join(shutdownErr, err)
+		}
 	}
 	// Either way Serve now returns ErrServerClosed. Waiting for it means the
-	// serving goroutine has exited by the time run does.
+	// serving goroutine has exited by the time serve does.
 	if err := <-serveErr; !errors.Is(err, http.ErrServerClosed) {
 		return errors.Join(shutdownErr, fmt.Errorf("serve: %w", err))
 	}
@@ -133,6 +160,63 @@ func run(ctx context.Context, addr string, logger *slog.Logger) error {
 		return fmt.Errorf("shutdown: %w", shutdownErr)
 	}
 	return nil
+}
+
+// inFlight counts the handlers that are running. It is not a sync.WaitGroup
+// because a connection accepted just before shutdown can start a handler
+// after the wait has begun, and a WaitGroup forbids an Add that races a Wait.
+type inFlight struct {
+	mu sync.Mutex
+	n  int
+	// changed is closed, and replaced, every time a handler returns.
+	changed chan struct{}
+}
+
+// track wraps h so that each request is counted while it runs.
+func (f *inFlight) track(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.n++
+		f.mu.Unlock()
+		defer f.done()
+		h.ServeHTTP(w, r)
+	})
+}
+
+func (f *inFlight) done() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.n--
+	if f.changed != nil {
+		close(f.changed)
+		f.changed = nil
+	}
+}
+
+// wait blocks until no handler is running, or reports how many still are
+// after timeout. A handler that ignores its cancelled context must not be
+// able to hold the process open forever.
+func (f *inFlight) wait(timeout time.Duration) error {
+	deadline := time.After(timeout)
+	for {
+		f.mu.Lock()
+		n := f.n
+		if n == 0 {
+			f.mu.Unlock()
+			return nil
+		}
+		if f.changed == nil {
+			f.changed = make(chan struct{})
+		}
+		changed := f.changed
+		f.mu.Unlock()
+
+		select {
+		case <-changed:
+		case <-deadline:
+			return fmt.Errorf("%d requests still running after %s", n, timeout)
+		}
+	}
 }
 
 // detector is stateless and safe for concurrent use, so one instance serves
