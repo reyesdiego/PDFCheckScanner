@@ -89,7 +89,7 @@ func noisyPNG(t *testing.T, w, h int) []byte {
 	return buf.Bytes()
 }
 
-func sampleJPEG(t *testing.T, w, h int) []byte {
+func sampleJPEG(t testing.TB, w, h int) []byte {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	var buf bytes.Buffer
@@ -789,4 +789,61 @@ func TestDetectReportsUnwritableTempDirAsServerError(t *testing.T) {
 		}
 		errorMessage(t, rec)
 	}
+}
+
+// A configured limit, not only the default, is what the endpoint enforces.
+func TestDetectHonoursConfiguredMaxPixels(t *testing.T) {
+	defer func(prev int) { maxPixels = prev }(maxPixels)
+	maxPixels = minMaxPixels
+
+	rec := upload(t, imageField, "big.png", samplePNG(t, 1100, 1000))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 (body %s)", rec.Code, rec.Body)
+	}
+	if msg := errorMessage(t, rec); !strings.Contains(msg, "1000000 pixels") {
+		t.Errorf("error %q does not state the configured limit", msg)
+	}
+	if rec := upload(t, imageField, "fits.png", samplePNG(t, 1000, 1000)); rec.Code != http.StatusOK {
+		t.Errorf("an image at the limit: status = %d, want 200", rec.Code)
+	}
+}
+
+func TestDecodeSafelyTurnsAPanicIntoAnError(t *testing.T) {
+	cfg, err := decodeSafely(func() (image.Config, error) {
+		panic("index out of range in a decoder")
+	})
+	if err == nil || !strings.Contains(err.Error(), "index out of range") {
+		t.Fatalf("err = %v, want the panic reported as an error", err)
+	}
+	if cfg != (image.Config{}) {
+		t.Errorf("cfg = %+v, want the zero value", cfg)
+	}
+}
+
+// Whatever bytes arrive, the answer is a verdict on them, never a crash or a
+// server error. go test runs the seeds; go test -fuzz=FuzzDetectImageUpload
+// searches beyond them.
+func FuzzDetectImageUpload(f *testing.F) {
+	for _, path := range []string{"testdata/form.png", "testdata/lossy.webp", "testdata/lossless.webp"} {
+		seed, err := os.ReadFile(path)
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(seed)
+	}
+	var gifSeed bytes.Buffer
+	if err := gif.Encode(&gifSeed, blankForm(40, 40), nil); err != nil {
+		f.Fatal(err)
+	}
+	f.Add(gifSeed.Bytes())
+	f.Add(sampleJPEG(f, 40, 40))
+
+	f.Fuzz(func(t *testing.T, content []byte) {
+		rec := uploadBrief(t, imageField, "fuzz", content)
+		switch rec.Code {
+		case http.StatusOK, http.StatusRequestEntityTooLarge, http.StatusUnsupportedMediaType:
+		default:
+			t.Fatalf("status = %d for %d bytes, body %s", rec.Code, len(content), rec.Body)
+		}
+	})
 }

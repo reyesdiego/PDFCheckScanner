@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,19 +22,51 @@ import (
 
 func main() {
 	addr := flag.String("addr", ":8080", "address to listen on")
+	pixels := flag.String("max-pixels", os.Getenv("MAX_PIXELS"),
+		fmt.Sprintf("largest image to accept, in pixels (default %d; env MAX_PIXELS)", defaultMaxPixels))
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	limit, err := parseMaxPixels(*pixels)
+	if err != nil {
+		logger.Error("bad configuration", "err", err)
+		os.Exit(2)
+	}
+	maxPixels = limit
+
 	// stop runs before os.Exit, which would skip a deferred call.
 	ctx, stop := shutdownOnSignal(context.Background())
-	err := run(ctx, *addr, logger)
+	err = run(ctx, *addr, logger)
 	stop()
 	if err != nil {
 		logger.Error("server failed", "err", err)
 		os.Exit(1)
 	}
+}
+
+// Bounds on a configured maxPixels. Below the minimum a letter page cannot be
+// rendered even at minRasterDPI, so every scanned PDF would come back empty;
+// above the maximum one decode can take 400 MB.
+const (
+	minMaxPixels = 1_000_000
+	maxMaxPixels = 100_000_000
+)
+
+// parseMaxPixels reads a -max-pixels value, where empty means the default.
+func parseMaxPixels(s string) (int, error) {
+	if s == "" {
+		return defaultMaxPixels, nil
+	}
+	n, err := strconv.Atoi(strings.ReplaceAll(s, "_", ""))
+	if err != nil {
+		return 0, fmt.Errorf("max pixels %q is not a whole number", s)
+	}
+	if n < minMaxPixels || n > maxMaxPixels {
+		return 0, fmt.Errorf("max pixels %d is outside %d-%d", n, minMaxPixels, maxMaxPixels)
+	}
+	return n, nil
 }
 
 // shutdownOnSignal returns a context that the first Interrupt or SIGTERM

@@ -160,7 +160,17 @@ make logs         # docker compose logs -f
 ```
 
 Every target sets `PKG_CONFIG_PATH` itself, so `make` works without the
-symlink. Run tests as a package (`make test` or `go test ./...`); `go test
+symlink.
+
+| flag | env | default | |
+| --- | --- | --- | --- |
+| `-addr` | | `:8080` | address to listen on |
+| `-max-pixels` | `MAX_PIXELS` | `24000000` | largest image accepted, 1M-100M; checked at startup |
+
+`MAX_PIXELS=40000000 make run` or `MAX_PIXELS=40000000 docker compose up`
+raises the limit. It also bounds each rendered PDF page.
+
+Run tests as a package (`make test` or `go test ./...`); `go test
 some_test.go` compiles one file and fails with `undefined: NewDetector`.
 
 ## Using it
@@ -231,7 +241,7 @@ Content-Type: application/json
 | 400 | there is no `image` file field | `missing "image" file field` |
 | 400 | the `image` field holds more than one file | `send exactly one "image" file, got 2` |
 | 413 | the upload is over 10 MiB | `upload must be at most 10485760 bytes` |
-| 413 | the image is over 24 million pixels | `image must be at most 24000000 pixels, got 5000x5000` |
+| 413 | the image is over the pixel limit, 24 million by default | `image must be at most 24000000 pixels, got 5000x5000` |
 | 415 | the file is empty | `uploaded file is empty` |
 | 415 | the file is not a supported type | `unsupported type "text/plain", want one of: ...` |
 | 415 | the image is malformed or truncated | `could not decode the uploaded image` |

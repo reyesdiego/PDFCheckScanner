@@ -6,6 +6,9 @@ services:
     # host port. ADDR is here so `docker compose up` matches `make run`.
     ports:
       - "${PORT:-8080}:8080"
+    # Unset or empty means the built-in default of 24 million pixels.
+    environment:
+      MAX_PIXELS: ${MAX_PIXELS:-}
     restart: unless-stopped
     # /detect only answers POST, so a GET is the cheapest proof that the
     # router is up: chi replies 405 rather than 404.

@@ -202,3 +202,32 @@ func TestShutdownOnSignal(t *testing.T) {
 		})
 	}
 }
+
+func TestParseMaxPixels(t *testing.T) {
+	for _, tc := range []struct {
+		in      string
+		want    int
+		wantErr bool
+	}{
+		{in: "", want: defaultMaxPixels},
+		{in: "30000000", want: 30_000_000},
+		{in: "30_000_000", want: 30_000_000},
+		{in: "1000000", want: minMaxPixels},
+		{in: "100000000", want: maxMaxPixels},
+		{in: "999999", wantErr: true},
+		{in: "100000001", wantErr: true},
+		{in: "-5", wantErr: true},
+		{in: "24M", wantErr: true},
+	} {
+		got, err := parseMaxPixels(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("parseMaxPixels(%q) = %d, want an error", tc.in, got)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("parseMaxPixels(%q) = %d, %v, want %d", tc.in, got, err, tc.want)
+		}
+	}
+}

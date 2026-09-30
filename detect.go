@@ -38,13 +38,18 @@ const (
 	// sniffBytes is what http.DetectContentType needs to identify a format.
 	sniffBytes = 512
 
-	// maxPixels caps the decoded image, which bounds both the memory a decode
-	// allocates and the time detection spends scanning it. 24M pixels is a
-	// 6000x4000 image, about 96 MB once decoded to RGBA.
-	maxPixels = 24_000_000
+	// defaultMaxPixels is the maxPixels the service starts with: a 6000x4000
+	// image, about 96 MB once decoded to RGBA.
+	defaultMaxPixels = 24_000_000
 
 	pdfType = "application/pdf"
 )
+
+// maxPixels caps the decoded image, which bounds both the memory a decode
+// allocates and the time detection spends scanning it. It is set once at
+// startup, from -max-pixels or MAX_PIXELS, before the server takes requests,
+// and only read after that.
+var maxPixels = defaultMaxPixels
 
 // allowedTypes are the formats accepted, keyed by the type sniffed from the
 // uploaded bytes rather than the client's declared Content-Type.
@@ -261,7 +266,10 @@ func handleDetect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	img, _, err := image.Decode(file)
+	img, err := decodeSafely(func() (image.Image, error) {
+		img, _, err := image.Decode(file)
+		return img, err
+	})
 	if err != nil {
 		writeError(w, http.StatusUnsupportedMediaType, "could not decode the uploaded image")
 		return
@@ -357,7 +365,10 @@ func sniffType(file io.ReadSeeker) (string, error) {
 // reader rewound. Every accepted image type has a registered decoder, so a
 // failure here means the bytes are malformed rather than an unknown format.
 func imageHeader(file io.ReadSeeker, contentType string) (image.Config, error) {
-	cfg, _, err := image.DecodeConfig(file)
+	cfg, err := decodeSafely(func() (image.Config, error) {
+		cfg, _, err := image.DecodeConfig(file)
+		return cfg, err
+	})
 	if err != nil {
 		return cfg, fmt.Errorf("malformed or truncated %s image", contentType)
 	}
@@ -368,6 +379,20 @@ func imageHeader(file io.ReadSeeker, contentType string) (image.Config, error) {
 }
 
 // sortedTypes lists allowedTypes in a stable order for error messages.
+// decodeSafely runs a decoder over uploaded bytes and turns a panic inside it
+// into an error. The decoders return errors for malformed input, but a decoder
+// bug met by hostile bytes would otherwise escape to the Recoverer middleware
+// as a bare 500, where a bad upload gets a 415 like any other.
+func decodeSafely[T any](decode func() (T, error)) (v T, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			var zero T
+			v, err = zero, fmt.Errorf("decoder panicked: %v", p)
+		}
+	}()
+	return decode()
+}
+
 func sortedTypes() []string {
 	types := make([]string, 0, len(allowedTypes))
 	for t := range allowedTypes {
