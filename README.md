@@ -32,6 +32,7 @@ Where to read next:
 | [Limitations](#limitations) | what it gets wrong, and edge cases |
 | [docs/PIPELINE.md](docs/PIPELINE.md) | how a checkbox is found, with figures |
 | [WRITEUP.md](WRITEUP.md) | design decisions, tradeoffs, next steps |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | reporting a problem, making a change |
 
 The code is also on GitHub, with its full history and the latest version:
 **https://github.com/reyesdiego/PDFCheckScanner**.
@@ -317,6 +318,16 @@ the gutter, and the results appear in the run window's **Tests** tab, not in
 the response body. VS Code's REST Client sends the requests but ignores the
 checks.
 
+## Contributing and reporting issues
+
+Found a missed box, a wrong answer or an error?
+[Open an issue](https://github.com/reyesdiego/PDFCheckScanner/issues/new/choose)
+using one of the two templates, and include the `?detail=true` response. Don't
+attach documents with personal data; a cropped or redacted region is enough.
+
+For changes, see [CONTRIBUTING.md](CONTRIBUTING.md). In short: branch from
+`main`, add a test that fails without the change, and run `make check`.
+
 ## Layout
 
 | file | |
@@ -328,3 +339,4 @@ checks.
 | `testdata/` | fixtures: generated forms and real appraisal pages; see `testdata/README.md` |
 | `api.http` | requests for the endpoint, runnable from the IDE with checks |
 | `Dockerfile`, `compose.yaml` | the container build: OpenCV and poppler from Debian trixie |
+| `CONTRIBUTING.md`, `.github/` | how to report a problem or make a change, and the issue templates |

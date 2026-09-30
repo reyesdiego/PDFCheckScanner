@@ -1,6 +1,7 @@
 # Only the Go sources and module files are needed to build; testdata is for
 # tests, and the sample appraisal documents must never reach an image.
 .git
+.github
 .idea
 bin/
 homevision
