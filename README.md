@@ -46,10 +46,11 @@ Only Docker is needed; the image brings its own OpenCV and poppler.
 docker compose up --build        # serves on http://localhost:8080; Ctrl-C stops it
 ```
 
-**In a browser,** open http://localhost:8080, then pick or drop a file. An
-image comes back with every checkbox outlined, green for marked and red for
-empty, above a table of the boxes; hovering a box highlights its row. A PDF's
-boxes are listed by page, since the page does not draw PDFs.
+**In a browser,** open http://localhost:8080, then pick or drop a file. It
+comes back with every checkbox outlined, green for marked and red for empty,
+above a table of the boxes; hovering a box highlights its row. A PDF is drawn
+page by page, up to the 10 pages that are scanned; that needs `pdftoppm`,
+and without it the page shows the table alone.
 
 ![The upload page showing a form with its checkboxes outlined](docs/img/20-upload-page.png)
 
@@ -263,8 +264,28 @@ Content-Type: application/json
 A 500 is the server's fault. Its cause goes to the server log with the
 request ID, never to the client. Branch on the status code; the
 messages are for people and may change. The
-router's own 405 (a method `/detect` does not take) and 404 (a path that is
-neither `/detect` nor the upload page) have no JSON body.
+router's own 405 (a method an endpoint does not take) and 404 (a path that is
+not `/detect`, `/preview` or the upload page) have no JSON body.
+
+### Page previews
+
+`POST /preview` takes the same upload as `/detect` and, for a PDF, returns a
+picture of each page `/detect` scans. It exists so the upload page can draw
+PDFs, but any client can use it:
+
+```json
+{
+  "pages": [
+    { "page": 1, "width": 850, "height": 1100, "scale": 0.3333, "image": "data:image/jpeg;base64,..." }
+  ]
+}
+```
+
+Pages are JPEGs at 100 DPI, and `scale` maps a box's coordinates, which are
+at 300 DPI, onto that page: multiply by it. An outsized page is drawn smaller,
+with a smaller `scale`, so no preview is over 4 megapixels. The upload limits
+and errors are the same as for `/detect`, and an image upload is a 415, since
+it can be shown as it is.
 
 ## Trying it out
 
@@ -342,6 +363,7 @@ For changes, see [CONTRIBUTING.md](CONTRIBUTING.md). In short: branch from
 | --- | --- |
 | `main.go` | chi router, middleware, flags, graceful shutdown |
 | `ui.go`, `ui/` | the upload page at `/`, embedded in the binary |
+| `preview.go` | `/preview`: PDF pages drawn for the upload page |
 | `detect.go` | the endpoint: multipart handling, sniffing, limits, response shape |
 | `detector.go` | the image detector (OpenCV via gocv) |
 | `pdf.go` | PDF handling: AcroForm fast path, pdftoppm fallback, page geometry |

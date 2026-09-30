@@ -152,6 +152,7 @@ func newRouter() *chi.Mux {
 		middleware.Timeout(30*time.Second),
 	)
 	r.Post("/detect", handleDetect)
+	r.Post("/preview", handlePreview)
 
 	r.Get("/", serveUI("index.html", "text/html; charset=utf-8"))
 	r.Get("/app.js", serveUI("app.js", "text/javascript; charset=utf-8"))

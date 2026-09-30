@@ -610,14 +610,15 @@ func TestDetectEndpointRejectsCorruptPDF(t *testing.T) {
 	errorMessage(t, rec)
 }
 
-// Only /detect and the upload page are routed. The compose healthcheck relies
-// on GET /detect being a 405.
+// Only /detect, /preview and the upload page are routed. The compose
+// healthcheck relies on GET /detect being a 405.
 func TestOnlyDetectAndTheUploadPageAreRouted(t *testing.T) {
 	for _, tc := range []struct {
 		method, path string
 		want         int
 	}{
 		{http.MethodGet, "/detect", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/preview", http.StatusMethodNotAllowed},
 		{http.MethodGet, "/", http.StatusOK},
 		{http.MethodPost, "/", http.StatusMethodNotAllowed},
 		{http.MethodGet, "/index.html", http.StatusNotFound},

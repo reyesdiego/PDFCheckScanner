@@ -155,5 +155,9 @@ check "the page's script is served" \
 	"200" \
 	"$(status GET /app.js)"
 
+check "/preview draws a PDF's pages" \
+	"3 0.3333" \
+	"$(curl -sS -X POST "$host/preview" -F "image=@testdata/form-fields.pdf" | jq -r '"\(.pages | length) \(.pages[0].scale * 10000 | floor / 10000)"')"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

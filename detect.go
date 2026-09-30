@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -191,68 +192,18 @@ func (b *box) UnmarshalJSON(data []byte) error {
 // can be rejected maps to its own status code, so clients can tell a file that
 // is too big from one that is the wrong type or is corrupt.
 func handleDetect(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	file, info, done, ok := readUpload(w, r)
+	if !ok {
+		return
+	}
+	defer done()
 
-	if err := r.ParseMultipartForm(maxMemoryBytes); err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) || strings.Contains(err.Error(), "too large") {
-			writeError(w, http.StatusRequestEntityTooLarge,
-				fmt.Sprintf("upload must be at most %d bytes", int64(maxUploadBytes)))
-			return
-		}
-		// A large upload spills to a temp file; failing to write it is the
-		// server's problem, not a malformed request.
-		var pathErr *fs.PathError
-		if errors.As(err, &pathErr) {
-			internalError(w, r, "could not buffer the upload", err)
-			return
-		}
-		writeError(w, http.StatusBadRequest,
-			fmt.Sprintf("request must be multipart/form-data with an %q file field", imageField))
-		return
-	}
-	// Parsing may have spilled the upload to a temp file; drop it on the way out.
-	defer r.MultipartForm.RemoveAll()
-
-	// FormFile would quietly take the first of several files, and the answer
-	// would then be about one of them without saying which.
-	headers := r.MultipartForm.File[imageField]
-	switch n := len(headers); {
-	case n == 0:
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("missing %q file field", imageField))
-		return
-	case n > 1:
-		writeError(w, http.StatusBadRequest,
-			fmt.Sprintf("send exactly one %q file, got %d", imageField, n))
-		return
-	}
-	header := headers[0]
-	file, err := header.Open()
-	if err != nil {
-		// The part arrived, so failing to open it, such as a spilled temp
-		// file gone missing, is the server's problem.
-		internalError(w, r, "could not read the upload", err)
-		return
-	}
-	defer file.Close()
-
-	contentType, err := sniffType(file)
-	if err != nil {
-		writeError(w, http.StatusUnsupportedMediaType, err.Error())
-		return
-	}
-	info := imageInfo{
-		Filename:    filepath.Base(header.Filename),
-		ContentType: contentType,
-		SizeBytes:   header.Size,
-	}
-
-	if contentType == pdfType {
+	if info.ContentType == pdfType {
 		handlePDF(w, r, file, info)
 		return
 	}
 
-	cfg, err := imageHeader(file, contentType)
+	cfg, err := imageHeader(file, info.ContentType)
 	if err != nil {
 		writeError(w, http.StatusUnsupportedMediaType, err.Error())
 		return
@@ -284,6 +235,79 @@ func handleDetect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondDetections(w, r, info, methodPixels, boxes)
+}
+
+// readUpload parses the request body and opens the one file in its image
+// field, checking its size and sniffing its type. When it cannot, it answers
+// the request itself and reports false. Otherwise done closes the file and
+// removes any temp file parsing spilled to, and the file is rewound.
+//
+// Every endpoint that takes an upload goes through here, so they cannot
+// drift apart on limits or on what each rejection is called.
+func readUpload(w http.ResponseWriter, r *http.Request) (file multipart.File, info imageInfo, done func(), ok bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+
+	if err := r.ParseMultipartForm(maxMemoryBytes); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) || strings.Contains(err.Error(), "too large") {
+			writeError(w, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("upload must be at most %d bytes", int64(maxUploadBytes)))
+			return nil, info, nil, false
+		}
+		// A large upload spills to a temp file; failing to write it is the
+		// server's problem, not a malformed request.
+		var pathErr *fs.PathError
+		if errors.As(err, &pathErr) {
+			internalError(w, r, "could not buffer the upload", err)
+			return nil, info, nil, false
+		}
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("request must be multipart/form-data with an %q file field", imageField))
+		return nil, info, nil, false
+	}
+	// Parsing may have spilled the upload to a temp file, which has to go
+	// however this ends.
+	removeSpill := func() { r.MultipartForm.RemoveAll() }
+
+	// FormFile would quietly take the first of several files, and the answer
+	// would then be about one of them without saying which.
+	headers := r.MultipartForm.File[imageField]
+	switch n := len(headers); {
+	case n == 0:
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("missing %q file field", imageField))
+		removeSpill()
+		return nil, info, nil, false
+	case n > 1:
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("send exactly one %q file, got %d", imageField, n))
+		removeSpill()
+		return nil, info, nil, false
+	}
+	header := headers[0]
+	file, err := header.Open()
+	if err != nil {
+		// The part arrived, so failing to open it, such as a spilled temp
+		// file gone missing, is the server's problem.
+		internalError(w, r, "could not read the upload", err)
+		removeSpill()
+		return nil, info, nil, false
+	}
+	done = func() {
+		file.Close()
+		removeSpill()
+	}
+
+	contentType, err := sniffType(file)
+	if err != nil {
+		writeError(w, http.StatusUnsupportedMediaType, err.Error())
+		done()
+		return nil, info, nil, false
+	}
+	return file, imageInfo{
+		Filename:    filepath.Base(header.Filename),
+		ContentType: contentType,
+		SizeBytes:   header.Size,
+	}, done, true
 }
 
 // handlePDF spools the upload to disk, which both pdfcpu and pdftoppm need,

@@ -33,14 +33,14 @@
 
       <p id="note" class="note" hidden></p>
 
-      <figure id="figure" hidden>
+      <div id="drawing" hidden>
         <div class="toolbar">
           <span class="legend"><i class="swatch checked"></i>Marked</span>
           <span class="legend"><i class="swatch empty"></i>Empty</span>
           <label class="toggle"><input type="checkbox" id="show-empty" checked> Show empty boxes</label>
         </div>
-        <canvas id="canvas" aria-label="The uploaded image with each detected checkbox outlined"></canvas>
-      </figure>
+        <div id="views"></div>
+      </div>
 
       <table id="boxes">
         <caption>Detected checkboxes, in reading order</caption>

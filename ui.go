@@ -12,10 +12,10 @@ import (
 var uiFiles embed.FS
 
 // uiPolicy lets the page load only its own script and stylesheet, talk only
-// to this service, and show only the image the user picked, which it reads
-// through a blob: URL.
+// to this service, and show only images: the one the user picked, through a
+// blob: URL, and the PDF pages /preview draws, as data: URLs.
 const uiPolicy = "default-src 'none'; script-src 'self'; style-src 'self'; " +
-	"img-src 'self' blob:; connect-src 'self'; base-uri 'none'; " +
+	"img-src 'self' blob: data:; connect-src 'self'; base-uri 'none'; " +
 	"form-action 'none'; frame-ancestors 'none'"
 
 // serveUI answers with one embedded file. Reading it here, when the router is

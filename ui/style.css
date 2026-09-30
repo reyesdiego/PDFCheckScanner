@@ -102,6 +102,11 @@ figure {
   margin: 0 0 1.5rem;
 }
 
+figcaption {
+  margin-bottom: 0.35rem;
+  font-weight: 600;
+}
+
 .toolbar {
   display: flex;
   flex-wrap: wrap;

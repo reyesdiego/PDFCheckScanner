@@ -24,7 +24,7 @@ func TestUploadPageIsServed(t *testing.T) {
 		t.Errorf("Content-Type = %q, want text/html", ct)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{`id="file"`, `id="canvas"`, `id="boxes"`} {
+	for _, want := range []string{`id="file"`, `id="views"`, `id="boxes"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page has no %s", want)
 		}
