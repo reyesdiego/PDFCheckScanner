@@ -58,8 +58,10 @@ func TestGenerateDocImages(t *testing.T) {
 
 	// Each pair is a bug the samples found, shown with the gate that fixes
 	// it switched off and then on.
+	// The rule-free pass rescues these boxes too, from a different contour,
+	// so it has to come off to show the tolerance bug on its own.
 	beforeAfter(t, "10-pentagon", "testdata/image1.png", image.Rect(700, 160, 1100, 200), 2,
-		func(d *Detector) { d.MinApproxEpsilon = 0 })
+		func(d *Detector) { d.MinApproxEpsilon, d.SeparateRules = 0, false })
 	// Two independent guards catch the banner lettering - it is both on ink
 	// rather than paper, and far off the page's box size - so both have to
 	// come off to show what it looked like.
@@ -67,6 +69,8 @@ func TestGenerateDocImages(t *testing.T) {
 		func(d *Detector) { d.MaxSurroundingInk, d.UndersizeFrac, d.OversizeFrac = 1.1, 0, 0 })
 	beforeAfter(t, "12-cells", "testdata/image2.png", image.Rect(780, 300, 1100, 400), 3,
 		func(d *Detector) { d.UndersizeFrac = 0 })
+	beforeAfter(t, "13-rules", "testdata/image1.png", image.Rect(40, 150, 640, 200), 2,
+		func(d *Detector) { d.SeparateRules = false })
 }
 
 // cropOf returns a copy of r out of img.

@@ -24,7 +24,7 @@ Whichever it is, these make an issue quick to act on:
   and any `-max-pixels` or `MAX_PIXELS` setting.
 - **The file, if you can share it.** A wrong detection is usually impossible
   to fix without the page. Check [Limitations](README.md#limitations) first:
-  skewed pages, boxes under 12px and boxes touching a table rule are known.
+  skewed pages, boxes under 12px and boxes on wavy or tilted rules are known.
 
 **Do not attach documents with personal data.** Appraisal reports carry names,
 addresses and prices. Crop to the region that goes wrong, redact the rest, or

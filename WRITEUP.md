@@ -101,6 +101,20 @@ welded into the grid and lost. But an unchecked box encloses a hole, and with
 `RetrievalList` that hole is a contour in its own right — so the box is still
 found by its interior.
 
+That rescue fails for exactly the boxes that matter most: a *marked* box's X
+splits its hole into four triangles, none of them the box. On `image1.png` nine
+boxes were lost this way, every one of them marked, while the empty boxes
+beside them were found. So there is a second pass. It erases every horizontal
+or vertical run of ink longer than the largest box allowed, which frees a box
+from the grid, and looks for contours again. What it finds is measured on the
+page as it really is, and it only fills gaps: where the first pass already
+found a box, its rectangle is kept, because the second pass traces a box with
+one edge erased. Scanned rules are ragged, so a pixel either side of each rule
+goes too; without that, a 68px leftover of a rule stayed attached to the first
+box it was meant to free. The pass finds all nine, adds nothing on the prose
+fixtures, and leaves every earlier detection on the four sample pages exactly
+as it was.
+
 ## Resolution is a design parameter, not a detail
 
 At 200 DPI the checkboxes on a real appraisal form come out 11-13px, and their
@@ -180,12 +194,18 @@ pages 3-6 are the four sample appraisal documents:
 | --- | --- | --- |
 | hand-written geometry | 167 / 82 / 195 | 17 / 83 / 24 / 79 |
 | contour fit on raw outlines | 0 / 0 / 0 | 121 / 40 / 50 / 72 |
-| **current, hull fit** | **0 / 0 / 0** | **133 / 41 / 56 / 78** |
+| **hull fit** | **0 / 0 / 0** | **133 / 41 / 56 / 78** |
+
+Those counts predate the rule-free pass, and the description PDF is not in the
+repository to re-measure. On the committed copies of the sample pages the pass
+changes `image1.png` from 69 detections to 78 and the other three not at all.
 
 On one region of page 5 where I established ground truth by eye, every checkbox
 is found with the correct marked state and no letters are boxed.
 
-Detection costs 37ms on a 3.8MP page and 252ms at the 24MP cap (Apple M4 Pro).
+Detection costs 37ms on a 3.8MP page and 252ms at the 24MP cap (Apple M4 Pro),
+measured before the rule-free pass, which adds about half as much again: 37ms
+to 57ms on the 2MP `image4.png`.
 The whole 7-page PDF takes about 4.2s end to end, nearly all of it `pdftoppm`.
 
 ## Tradeoffs
@@ -282,13 +302,10 @@ query parameter away.
 2. **Deskew** before detection, via the dominant angle of the page's long
    lines. This is the limitation most likely to bite on real photographed
    documents.
-3. **Morphological rule removal** — erase long horizontal and vertical runs
-   before finding contours — so that boxes welded to table rules are found by
-   their outline and not only by their hole.
-4. **A small classifier on candidate crops.** The geometry stage is a good
+3. **A small classifier on candidate crops.** The geometry stage is a good
    region proposer; a lightweight CNN over 32x32 crops would decide
    checkbox-or-not and marked-or-not far better than thresholds, given labels.
-5. **Calibrate confidence** against those labels so it can be thresholded by
+4. **Calibrate confidence** against those labels so it can be thresholded by
    callers.
 
 ## Testing notes

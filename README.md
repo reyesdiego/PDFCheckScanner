@@ -93,7 +93,7 @@ that looks for **quadrilaterals, not square-ish blobs**, because `D` and `o`
 are as square as a checkbox.
 
 **[docs/PIPELINE.md](docs/PIPELINE.md) walks through each step with
-figures**, including the three bugs real appraisal pages exposed. The figures
+figures**, including the four bugs real appraisal pages exposed. The figures
 are drawn by the detector itself (`make docs`), so they cannot drift from the
 code.
 
@@ -106,9 +106,9 @@ been checked against a handful of real pages. What it is known to get wrong:
   is no deskew step, so photographed or crooked scans do poorly.
 - **Small boxes are not found.** Below about 12px a checkbox and a letter look
   the same. Scan at 200-300 DPI; nothing warns you when an image is too coarse.
-- **Boxes touching a table rule can be missed.** The border merges into the
-  grid, and the box is found only by its empty interior, which a mark breaks
-  up. On one sample page this hides about a third of the marked boxes.
+- **Boxes on a wavy or tilted rule can be missed.** A box whose border runs
+  into a table rule is found by erasing the rules and looking again, but only
+  straight, level rules are recognised as rules.
 - **Square table cells can be reported as checkboxes** when they are the same
   size and shape.
 - **A pen stroke through a box loses it**, and so does a border broken worse

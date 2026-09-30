@@ -8,7 +8,7 @@ labels: bug
 Please don't attach documents with personal data. Crop to the region that
 goes wrong, redact the rest, or recreate it on a blank page.
 Known limitations are listed in the README: skew, boxes under 12px, and
-boxes touching a table rule.
+boxes on wavy or tilted rules.
 -->
 
 **What is wrong**

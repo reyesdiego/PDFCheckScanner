@@ -143,6 +143,15 @@ type Detector struct {
 	OversizeFrac  float64
 	// MaxDetections caps how many checkboxes a single image can report.
 	MaxDetections int
+	// SeparateRules adds a second look for boxes whose border runs into a
+	// table rule. Such a box's outline is part of the table's contour, so it
+	// is found only by the hole inside it, and a mark splits that hole into
+	// pieces: a boldly crossed box on a form's first row, its bottom edge on
+	// the rule beneath, was missed outright while the empty boxes beside it
+	// were found. The second pass looks for contours with every line longer
+	// than a checkbox erased, which frees the box from the table, and measures
+	// what it finds on the page as it really is.
+	SeparateRules bool
 }
 
 // NewDetector returns a Detector tuned for checkboxes on scanned forms.
@@ -170,6 +179,7 @@ func NewDetector() *Detector {
 		UndersizeFrac:             0.15,
 		OversizeFrac:              0.25,
 		MaxDetections:             500,
+		SeparateRules:             true,
 	}
 }
 
@@ -180,11 +190,6 @@ func NewDetector() *Detector {
 // bounding box no longer matches it, so rectangularity drops and the box is
 // lost. Estimating the page angle from its long lines and rotating would make
 // photographed documents work.
-//
-// TODO: erase long horizontal and vertical runs before finding contours. A
-// checkbox whose border runs into a table rule is currently found only by its
-// interior hole, which means a marked one, whose hole is broken up by the
-// mark, can be missed entirely.
 //
 // An error means the image could not be examined, which is a different answer
 // from an empty result and has to stay distinguishable from it: a caller that
@@ -243,7 +248,18 @@ func (d *Detector) Detect(img image.Image) ([]detection, error) {
 	defer global.Close()
 	gocv.Threshold(src, &global, 0, 255, gocv.ThresholdBinaryInv|gocv.ThresholdOtsu)
 
-	found := d.candidates(masks{shape: shape, ink: ink, global: global})
+	m := masks{shape: shape, ink: ink, global: global}
+	found := d.candidates(m, shape)
+	if d.SeparateRules {
+		// A rule is anything longer than the largest box allowed, so no
+		// checkbox side can be mistaken for one and erased.
+		loose, err := withoutRules(shape, d.maxSide(shape)+1)
+		if err != nil {
+			return nil, fmt.Errorf("separate rules: %w", err)
+		}
+		defer loose.Close()
+		found = fillGaps(found, d.candidates(m, loose))
+	}
 	found = dedupe(found)
 	found = dropOffSizeBoxes(found, d.UndersizeFrac, d.OversizeFrac)
 	if len(found) > d.MaxDetections {
@@ -356,11 +372,67 @@ func noiseSigma(src gocv.Mat) (float64, error) {
 	return mean.GetDoubleAt(0, 0), nil
 }
 
-// candidates fits a polygon to every contour in shape and keeps the ones
-// shaped like a checkbox. Geometry comes from shape, and whether a box is
-// marked is read from ink; the two are the same mask unless the page was
-// quiet enough to be binarized softly.
-func (d *Detector) candidates(m masks) []detection {
+// maxSide is the largest checkbox side allowed on a page of shape's size.
+func (d *Detector) maxSide(shape gocv.Mat) int {
+	shortEdge := float64(min(shape.Cols(), shape.Rows()))
+	side := max(d.MaxSide, int(math.Round(d.MaxSideShortEdgeFrac*shortEdge)))
+	return min(side, int(d.MaxSideFrac*shortEdge))
+}
+
+// withoutRules returns shape with every horizontal or vertical run of ink at
+// least length long erased. A box whose border sits on a rule loses that edge
+// with the rule, but it comes free of the table as a shape of its own, and
+// its hull, which is what the gates fit, is still the box.
+func withoutRules(shape gocv.Mat, length int) (gocv.Mat, error) {
+	lines := gocv.NewMat()
+	defer lines.Close()
+	vertical := gocv.NewMat()
+	defer vertical.Close()
+
+	horizontalKernel := gocv.GetStructuringElement(gocv.MorphRect, image.Pt(length, 1))
+	defer horizontalKernel.Close()
+	verticalKernel := gocv.GetStructuringElement(gocv.MorphRect, image.Pt(1, length))
+	defer verticalKernel.Close()
+
+	// Opening with a line-shaped kernel keeps only the ink that a line that
+	// long fits inside, which is exactly the rules.
+	if err := gocv.MorphologyEx(shape, &lines, gocv.MorphOpen, horizontalKernel); err != nil {
+		return gocv.Mat{}, err
+	}
+	if err := gocv.MorphologyEx(shape, &vertical, gocv.MorphOpen, verticalKernel); err != nil {
+		return gocv.Mat{}, err
+	}
+	if err := gocv.BitwiseOr(lines, vertical, &lines); err != nil {
+		return gocv.Mat{}, err
+	}
+
+	// A scanned rule is ragged: one of its rows breaks off into runs shorter
+	// than length, which the opening keeps. On image1 such a 68px leftover
+	// stayed attached to the corner of the box above it, and the box came
+	// out five times too wide. Growing the rules by a pixel takes their
+	// ragged edges with them.
+	fringe := gocv.GetStructuringElement(gocv.MorphRect, image.Pt(3, 3))
+	defer fringe.Close()
+	if err := gocv.Dilate(lines, &lines, fringe); err != nil {
+		return gocv.Mat{}, err
+	}
+
+	loose := gocv.NewMat()
+	if err := gocv.Subtract(shape, lines, &loose); err != nil {
+		loose.Close()
+		return gocv.Mat{}, err
+	}
+	return loose, nil
+}
+
+// candidates fits a polygon to every contour in outlines and keeps the ones
+// shaped like a checkbox. The contours come from outlines, which is shape
+// itself or shape with its rules erased; everything measured about them is
+// read from m, so a candidate scores the same whichever mask found it.
+// Geometry is measured in shape, and whether a box is marked is read from
+// ink; the two are the same mask unless the page was quiet enough to be
+// binarized softly.
+func (d *Detector) candidates(m masks, outlines gocv.Mat) []detection {
 	shape, ink := m.shape, m.ink
 	hierarchy := gocv.NewMat()
 	defer hierarchy.Close()
@@ -368,12 +440,10 @@ func (d *Detector) candidates(m masks) []detection {
 	// RetrievalList returns holes alongside outlines, which is what lets an
 	// unchecked box be found by its interior when its border is welded to a
 	// table rule.
-	contours := gocv.FindContoursWithParams(shape, &hierarchy, gocv.RetrievalList, gocv.ChainApproxSimple)
+	contours := gocv.FindContoursWithParams(outlines, &hierarchy, gocv.RetrievalList, gocv.ChainApproxSimple)
 	defer contours.Close()
 
-	shortEdge := float64(min(shape.Cols(), shape.Rows()))
-	maxSide := max(d.MaxSide, int(math.Round(d.MaxSideShortEdgeFrac*shortEdge)))
-	maxSide = min(maxSide, int(d.MaxSideFrac*shortEdge))
+	maxSide := d.maxSide(shape)
 	found := make([]detection, 0, contours.Size())
 
 	for i := range contours.Size() {
@@ -729,6 +799,29 @@ func dropOffSizeBoxes(dets []detection, under, over float64) []detection {
 // dedupe drops candidates that overlap or nest inside another, which is what a
 // box's outline and its own interior hole produce. The larger box wins, so a
 // hole never shadows the border around it.
+// fillGaps adds the candidates in extra that are nowhere near anything in
+// found. The rule-free pass exists to find boxes the first pass could not see
+// at all. Where both found a box the first pass's rectangle is kept: the
+// second pass traces a box with one edge erased, or with a stray remnant of a
+// rule still attached, so its rectangle can come out a pixel short or several
+// too wide, and dedupe, which keeps the larger, would otherwise prefer it.
+func fillGaps(found, extra []detection) []detection {
+	out := found
+	for _, e := range extra {
+		near := false
+		for _, f := range found {
+			if iou(e.Box, f.Box) > 0.3 || nests(e.Box, f.Box) {
+				near = true
+				break
+			}
+		}
+		if !near {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 func dedupe(dets []detection) []detection {
 	sort.SliceStable(dets, func(i, j int) bool {
 		a, b := dets[i].Box, dets[j].Box

@@ -194,13 +194,32 @@ this check no longer changes any measured result on its own. It is kept
 because it works on pages too sparse for the size prior — which needs ten
 boxes before it trusts a median — and because the two use independent signals.
 
+### Marked boxes fused to a table rule
+
+![Before and after: the rule-free pass](img/13-rules-before.png)
+![After: the crossed Owner box is found](img/13-rules-after.png)
+
+A user noticed this one: on the Occupant row, every empty box was found and
+the crossed one in front of them, Owner, was not. Its bottom edge runs into
+the rule under the row, so its outline belongs to the table's contour,
+1081x1648. An empty box in that position is still found by its hole, but the
+X splits the hole into four triangles, and none of them is a box.
+
+The fix is a second look with the rules gone. Every horizontal or vertical
+run of ink longer than the largest box allowed is erased, and contours are
+found again; what turns up is still measured on the unaltered page. Scanned
+rules are ragged, and a 68px leftover of this one stayed attached to Owner's
+corner until a pixel either side of each rule was erased too. The pass only
+fills gaps, so a box the first pass found keeps its rectangle.
+
+**69 → 78 detections on that page**, all nine new ones marked, with every
+earlier detection unchanged and the prose fixtures still at zero.
+
 ## What it still gets wrong
 
-- **Boxes welded to a table rule.** When a border runs into the grid, the
-  outer contour becomes the whole table and the box is found only by its
-  interior hole. A *marked* box has that hole broken up by the mark, so it can
-  be missed entirely. This is the largest remaining gap: on one page it is why
-  roughly a third of the marked boxes go unreported.
+- **Boxes on a wavy or tilted rule.** Only straight, level runs are
+  recognised as rules, so a box welded to a rule that wanders by a pixel
+  along its length is still found only by its hole.
 - **Four ruled cells on one page** sit 23% above its median size while another
   page's real marked boxes reach 21% above. Two points of margin is not enough
   to act on.

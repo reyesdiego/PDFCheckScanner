@@ -770,11 +770,8 @@ func TestThresholdCFollowsImageNoise(t *testing.T) {
 // vertex. Perfect squares came back as pentagons and were thrown out for not
 // being quadrilaterals - 20 of this page's boxes, a third of them.
 //
-// The page is also the clearest example of the table-rule limitation: its
-// marked boxes are fused to the form's grid, so their enclosing contour is
-// the whole 1081x1648 table and the X breaks up the interior hole that would
-// otherwise find them. That is why so few of these read as checked, and it
-// is why this test does not assert a count of them.
+// The page is also where boxes fused to the form's grid were lost; that is
+// TestDetectFindsMarkedBoxesOnTableRules.
 func TestDetectFindsSmallBoxesRejectedAsPentagons(t *testing.T) {
 	got := mustDetect(t, NewDetector(), loadPNG(t, "testdata/image1.png"))
 	if len(got) < 55 {
@@ -812,5 +809,54 @@ func TestDetectMarksThinCrossesAsChecked(t *testing.T) {
 		if d.Checked != want[i] {
 			t.Errorf("[%d] at x=%d checked = %v, want %v", i, d.Box.X, d.Checked, want[i])
 		}
+	}
+}
+
+// On image1 a marked box whose edge runs into a table rule is part of the
+// table's contour, 1081x1648, and its X splits the hole that finds an empty
+// box into four triangles, so neither contour is the box. The first one a
+// user noticed was Owner, the first box on the Occupant row, missed while
+// the empty boxes beside it were found. These nine are every box on the page
+// that was lost that way; all of them are marked.
+func TestDetectFindsMarkedBoxesOnTableRules(t *testing.T) {
+	img := loadPNG(t, "testdata/image1.png")
+	owner := box{X: 111, Y: 168, Width: 18, Height: 18}
+	fused := []box{
+		owner,
+		{X: 115, Y: 556, Width: 17, Height: 18},
+		{X: 195, Y: 668, Width: 18, Height: 17},
+		{X: 595, Y: 667, Width: 18, Height: 18},
+		{X: 595, Y: 689, Width: 18, Height: 17},
+		{X: 195, Y: 711, Width: 18, Height: 17},
+		{X: 486, Y: 710, Width: 17, Height: 18},
+		{X: 1043, Y: 1034, Width: 17, Height: 18},
+		{X: 480, Y: 1099, Width: 18, Height: 17},
+	}
+	find := func(dets []detection, want box) (detection, bool) {
+		for _, d := range dets {
+			if iou(d.Box, want) > 0.5 {
+				return d, true
+			}
+		}
+		return detection{}, false
+	}
+
+	got := mustDetect(t, NewDetector(), img)
+	for _, want := range fused {
+		d, ok := find(got, want)
+		if !ok {
+			t.Errorf("no checkbox at %+v", want)
+			continue
+		}
+		if !d.Checked {
+			t.Errorf("box at %+v reported empty; it is crossed", want)
+		}
+	}
+
+	// The second pass is what finds them: without it Owner is lost again.
+	off := NewDetector()
+	off.SeparateRules = false
+	if _, ok := find(mustDetect(t, off, img), owner); ok {
+		t.Error("Owner found without SeparateRules; this test no longer shows what it is for")
 	}
 }
