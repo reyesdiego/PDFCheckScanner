@@ -211,7 +211,8 @@ func handleDetect(w http.ResponseWriter, r *http.Request) {
 
 	// FormFile would quietly take the first of several files, and the answer
 	// would then be about one of them without saying which.
-	switch n := len(r.MultipartForm.File[imageField]); {
+	headers := r.MultipartForm.File[imageField]
+	switch n := len(headers); {
 	case n == 0:
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("missing %q file field", imageField))
 		return
@@ -220,9 +221,12 @@ func handleDetect(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("send exactly one %q file, got %d", imageField, n))
 		return
 	}
-	file, header, err := r.FormFile(imageField)
+	header := headers[0]
+	file, err := header.Open()
 	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("missing %q file field", imageField))
+		// The part arrived, so failing to open it, such as a spilled temp
+		// file gone missing, is the server's problem.
+		internalError(w, r, "could not read the upload", err)
 		return
 	}
 	defer file.Close()

@@ -25,16 +25,24 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	// Interrupt and SIGTERM cancel ctx, which is what tells run to shut down.
-	// stop releases the signal handler, and runs before os.Exit, which would
-	// skip a deferred call.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// stop runs before os.Exit, which would skip a deferred call.
+	ctx, stop := shutdownOnSignal(context.Background())
 	err := run(ctx, *addr, logger)
 	stop()
 	if err != nil {
 		logger.Error("server failed", "err", err)
 		os.Exit(1)
 	}
+}
+
+// shutdownOnSignal returns a context that the first Interrupt or SIGTERM
+// cancels, which is what tells run to shut down. Only the first is caught:
+// once ctx is done, signals get their default behaviour back, so a second one
+// ends the process at once instead of waiting out the shutdown grace period.
+func shutdownOnSignal(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
+	context.AfterFunc(ctx, stop)
+	return ctx, stop
 }
 
 // run serves on addr until the server fails or ctx is cancelled, then gives

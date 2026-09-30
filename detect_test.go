@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -298,6 +299,36 @@ func TestDetectRejectsMoreThanOneImage(t *testing.T) {
 	if msg := errorMessage(t, rec); !strings.Contains(msg, "got 2") {
 		t.Errorf("error %q does not say how many files arrived", msg)
 	}
+}
+
+// A part that arrived but cannot be opened, here because its spilled temp
+// file was deleted after parsing, must not be reported as a missing field.
+func TestDetectReportsUnopenableUploadAsServerError(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+
+	req := uploadRequest(t, "/detect", imageField, "form.png", samplePNG(t, 2, 2))
+	// With no memory allowance every file part spills to disk; the handler
+	// then finds the form already parsed and uses it as it stands.
+	if err := req.ParseMultipartForm(0); err != nil {
+		t.Fatal(err)
+	}
+	spilled, err := filepath.Glob(filepath.Join(dir, "multipart-*"))
+	if err != nil || len(spilled) == 0 {
+		t.Fatalf("no spilled part in %s (err %v)", dir, err)
+	}
+	for _, f := range spilled {
+		if err := os.Remove(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	newRouter().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (body %s)", rec.Code, rec.Body)
+	}
+	errorMessage(t, rec)
 }
 
 func TestDetectRejectsNonMultipartBody(t *testing.T) {

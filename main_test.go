@@ -6,8 +6,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"os/signal"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -44,6 +47,15 @@ func waitFor(t *testing.T, done <-chan error, within time.Duration) error {
 	}
 }
 
+// goroutineBaseline counts running goroutines once os/signal has started its
+// watcher, which it does on first use and never stops. TestShutdownOnSignal
+// starts it, so without this the run tests would pass or fail by test order.
+func goroutineBaseline() int {
+	_, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	stop()
+	return runtime.NumGoroutine()
+}
+
 // requireGoroutinesBackTo fails if goroutines started during the test are
 // still running, allowing a moment for exiting ones to be reaped.
 func requireGoroutinesBackTo(t *testing.T, baseline int) {
@@ -64,7 +76,7 @@ func TestRunFailsFastWhenThePortIsTaken(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer taken.Close()
-	baseline := runtime.NumGoroutine()
+	baseline := goroutineBaseline()
 
 	err = waitFor(t, runInBackground(context.Background(), taken.Addr().String()), 5*time.Second)
 	if err == nil || !strings.Contains(err.Error(), "listen") {
@@ -75,7 +87,7 @@ func TestRunFailsFastWhenThePortIsTaken(t *testing.T) {
 
 func TestRunStopsCleanlyWhenCancelled(t *testing.T) {
 	addr := freeAddr(t)
-	baseline := runtime.NumGoroutine()
+	baseline := goroutineBaseline()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -111,4 +123,25 @@ func TestRunStopsCleanlyWhenCancelled(t *testing.T) {
 	}
 	ln.Close()
 	requireGoroutinesBackTo(t, baseline)
+}
+
+// main relies on this to shut down: a container stop is a SIGTERM, Ctrl-C is
+// an Interrupt, and either must cancel the context run is given. The process
+// signals itself, which the handler catches, so the test binary survives.
+func TestShutdownOnSignal(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM} {
+		t.Run(sig.String(), func(t *testing.T) {
+			ctx, stop := shutdownOnSignal(context.Background())
+			defer stop()
+
+			if err := syscall.Kill(os.Getpid(), sig); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s did not cancel the context", sig)
+			}
+		})
+	}
 }
